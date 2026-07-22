@@ -12,6 +12,8 @@ The recommended first-test route is the dedicated GitHub Actions workflow. It us
 6. Download the `NetSSH-Windows-Tester-<run number>` artifact from the workflow summary.
 7. Extract the downloaded ZIP before running the installer.
 
+The installer itself is the `.exe` file inside the extracted artifact. Double-click it to install NetSSH.
+
 The artifact contains:
 
 - The NetSSH NSIS `.exe` installer.

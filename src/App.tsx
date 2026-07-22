@@ -23,11 +23,12 @@ const navItems: { id: View; label: string; icon: typeof TerminalSquare }[] = [
 ];
 
 const statusLabel = { online: "Reachable", warning: "Attention", offline: "Offline" };
-type AppPreferences = { compactWorkspace: boolean; showConnectionWarnings: boolean; defaultProtocol: ConnectionProtocol; sites: string[]; platforms: string[] };
+type Appearance = "dark" | "light" | "system";
+type AppPreferences = { appearance: Appearance; compactWorkspace: boolean; showConnectionWarnings: boolean; defaultProtocol: ConnectionProtocol; sites: string[]; platforms: string[] };
 type AppNotification = { id: string; message: string; createdAt: number; read: boolean };
 const defaultPlatforms = ["Cisco IOS-XE", "Cisco NX-OS", "Arista EOS", "Juniper JunOS", "Palo Alto", "Fortinet FortiOS", "Linux", "Other"];
 const defaultSites = [...new Set(initialHosts.map((host) => host.site))].sort();
-const defaultPreferences: AppPreferences = { compactWorkspace: false, showConnectionWarnings: true, defaultProtocol: "ssh", sites: defaultSites, platforms: defaultPlatforms };
+const defaultPreferences: AppPreferences = { appearance: "dark", compactWorkspace: false, showConnectionWarnings: true, defaultProtocol: "ssh", sites: defaultSites, platforms: defaultPlatforms };
 
 function App() {
   const [view, setView] = useState<View>("workspace");
@@ -52,6 +53,7 @@ function App() {
     try { return { ...defaultPreferences, ...JSON.parse(localStorage.getItem("netssh.preferences") ?? "{}") }; }
     catch { return defaultPreferences; }
   });
+  const [systemDark, setSystemDark] = useState(() => window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? true);
   const [notifications, setNotifications] = useState<AppNotification[]>([
     { id: "phase-3", message: "Phase 3 workspace tools are ready: tabs, split panes, and AI side panel.", createdAt: Date.now(), read: false },
   ]);
@@ -75,6 +77,14 @@ function App() {
   useEffect(() => {
     localStorage.setItem("netssh.preferences", JSON.stringify(preferences));
   }, [preferences]);
+
+  useEffect(() => {
+    const query = window.matchMedia?.("(prefers-color-scheme: dark)");
+    if (!query) return;
+    const update = (event: MediaQueryListEvent) => setSystemDark(event.matches);
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
 
   const connect = async (host: Host, forceNew = false): Promise<string | null> => {
     const protocol = host.protocol ?? "ssh";
@@ -143,8 +153,10 @@ function App() {
 
   const currentSession = sessions.find((session) => session.id === activeSession);
 
+  const lightMode = preferences.appearance === "light" || (preferences.appearance === "system" && !systemDark);
+
   return (
-    <div className={`app-shell ${preferences.compactWorkspace ? "compact-workspace" : ""}`}>
+    <div className={`app-shell ${lightMode ? "theme-light" : "theme-dark"} ${preferences.compactWorkspace ? "compact-workspace" : ""}`}>
       <div className="window-drag"><span /><span /><span /></div>
       <Sidebar view={view} setView={setView} open={sidebarOpen} setOpen={setSidebarOpen} onSearch={() => setSearchOpen(true)} onOpenSettings={() => setSettingsOpen(true)} notify={notify} deviceCount={deviceHosts.length} />
       <main className={`main ${sidebarOpen ? "" : "main-expanded"}`}>
@@ -213,7 +225,7 @@ function NotificationCenter({ notifications, onClear }: { notifications: AppNoti
 
 function SettingsModal({ preferences, onClose, onSave }: { preferences: AppPreferences; onClose: () => void; onSave: (preferences: AppPreferences) => void }) {
   const [draft, setDraft] = useState(preferences);
-  return <div className="modal-backdrop" onMouseDown={onClose}><section className="settings-modal" onMouseDown={(event) => event.stopPropagation()}><div className="provider-modal-head"><div><span><Settings size={18} /></span><div><h3>NetSSH settings</h3><p>Workspace preferences are stored locally on this device.</p></div></div><button onClick={onClose}><X size={17} /></button></div><div className="settings-body"><label className="settings-select"><span><strong>Default connection protocol</strong><small>Used when creating a new device profile</small></span><select value={draft.defaultProtocol} onChange={(event) => setDraft({ ...draft, defaultProtocol: event.target.value as ConnectionProtocol })}><option value="ssh">SSH</option><option value="telnet">Telnet</option><option value="serial">Serial</option></select></label><label className="settings-toggle"><span><strong>Compact workspace</strong><small>Reduce tab, toolbar, and terminal spacing</small></span><input type="checkbox" checked={draft.compactWorkspace} onChange={(event) => setDraft({ ...draft, compactWorkspace: event.target.checked })} /></label><label className="settings-toggle"><span><strong>Connection safety notices</strong><small>Show authentication and trust limitations in new sessions</small></span><input type="checkbox" checked={draft.showConnectionWarnings} onChange={(event) => setDraft({ ...draft, showConnectionWarnings: event.target.checked })} /></label><ConfigList title="Inventory sites" description="Available when adding or editing a device" items={draft.sites} placeholder="Add a site" onChange={(sites) => setDraft({ ...draft, sites })} /><ConfigList title="Device platforms" description="Vendor and operating-system choices" items={draft.platforms} placeholder="Add a platform" onChange={(platforms) => setDraft({ ...draft, platforms })} /><div className="settings-security"><ShieldCheck size={16} /><span>Credentials remain in the operating system vault. NetSSH does not store passwords in preferences.</span></div></div><div className="modal-actions settings-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" onClick={() => onSave(draft)}>Save settings</button></div></section></div>;
+  return <div className="modal-backdrop" onMouseDown={onClose}><section className="settings-modal" onMouseDown={(event) => event.stopPropagation()}><div className="provider-modal-head"><div><span><Settings size={18} /></span><div><h3>NetSSH settings</h3><p>Workspace preferences are stored locally on this device.</p></div></div><button onClick={onClose}><X size={17} /></button></div><div className="settings-body"><label className="settings-select"><span><strong>Appearance</strong><small>Choose a light, dark, or operating-system theme</small></span><select value={draft.appearance} onChange={(event) => setDraft({ ...draft, appearance: event.target.value as Appearance })}><option value="dark">Dark</option><option value="light">Light</option><option value="system">Use system setting</option></select></label><label className="settings-select"><span><strong>Default connection protocol</strong><small>Used when creating a new device profile</small></span><select value={draft.defaultProtocol} onChange={(event) => setDraft({ ...draft, defaultProtocol: event.target.value as ConnectionProtocol })}><option value="ssh">SSH</option><option value="telnet">Telnet</option><option value="serial">Serial</option></select></label><label className="settings-toggle"><span><strong>Compact workspace</strong><small>Reduce tab, toolbar, and terminal spacing</small></span><input type="checkbox" checked={draft.compactWorkspace} onChange={(event) => setDraft({ ...draft, compactWorkspace: event.target.checked })} /></label><label className="settings-toggle"><span><strong>Connection safety notices</strong><small>Show authentication and trust limitations in new sessions</small></span><input type="checkbox" checked={draft.showConnectionWarnings} onChange={(event) => setDraft({ ...draft, showConnectionWarnings: event.target.checked })} /></label><ConfigList title="Inventory sites" description="Available when adding or editing a device" items={draft.sites} placeholder="Add a site" onChange={(sites) => setDraft({ ...draft, sites })} /><ConfigList title="Device platforms" description="Vendor and operating-system choices" items={draft.platforms} placeholder="Add a platform" onChange={(platforms) => setDraft({ ...draft, platforms })} /><div className="settings-security"><ShieldCheck size={16} /><span>Credentials remain in the operating system vault. NetSSH does not store passwords in preferences.</span></div></div><div className="modal-actions settings-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" onClick={() => onSave(draft)}>Save settings</button></div></section></div>;
 }
 
 function ConfigList({ title, description, items, placeholder, onChange }: { title: string; description: string; items: string[]; placeholder: string; onChange: (items: string[]) => void }) {

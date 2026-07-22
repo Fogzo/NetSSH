@@ -13,6 +13,7 @@ NetSSH is a modern, network-engineer-first SSH workspace for Windows and macOS, 
 - Native OS credential storage for provider API keys and device passwords
 - Global command palette (`Cmd/Ctrl + K`)
 - Responsive UI designed to adapt to future tablet and mobile layouts
+- Persistent light, dark, and operating-system appearance modes
 - Local-first security concept with no required cloud account
 
 The terminal currently provides an interactive product demonstration. The native SSH transport and device persistence are the next backend milestone.
