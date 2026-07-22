@@ -1,0 +1,32 @@
+{
+  "name": "netssh",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build",
+    "desktop:app": "tauri build --bundles app",
+    "package:test:mac": "tauri build --bundles app,dmg --no-sign",
+    "package:test:windows": "tauri build --bundles nsis --no-sign --ci"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "latest",
+    "@tauri-apps/plugin-opener": "latest",
+    "@vitejs/plugin-react": "latest",
+    "lucide-react": "latest",
+    "vite": "latest",
+    "react": "latest",
+    "react-dom": "latest"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "typescript": "latest"
+  }
+}

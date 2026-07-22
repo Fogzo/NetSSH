@@ -1,0 +1,71 @@
+name: Build Windows tester installer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-installer:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          components: rustfmt, clippy
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate frontend
+        run: npm run build
+
+      - name: Validate native core
+        run: |
+          cargo fmt --manifest-path src-tauri/Cargo.toml --check
+          cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+          cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build unsigned NSIS installer
+        run: npm run tauri -- build --bundles nsis --no-sign --ci
+
+      - name: Prepare tester artifact
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem "src-tauri/target/release/bundle/nsis" -Filter "*.exe" | Select-Object -First 1
+          if (-not $installer) { throw "The NSIS installer was not created." }
+
+          New-Item -ItemType Directory -Force -Path "artifacts/windows" | Out-Null
+          Copy-Item $installer.FullName "artifacts/windows/$($installer.Name)"
+
+          $hash = Get-FileHash $installer.FullName -Algorithm SHA256
+          "$($hash.Hash.ToLower())  $($installer.Name)" | Set-Content "artifacts/windows/$($installer.Name).sha256"
+
+          $version = (Get-Content package.json | ConvertFrom-Json).version
+          @(
+            "Product: NetSSH"
+            "Version: $version"
+            "Commit: $env:GITHUB_SHA"
+            "Workflow run: $env:GITHUB_RUN_NUMBER"
+            "Signing: unsigned internal tester build"
+          ) | Set-Content "artifacts/windows/build-info.txt"
+
+      - name: Upload Windows tester package
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetSSH-Windows-Tester-${{ github.run_number }}
+          path: artifacts/windows/*
+          if-no-files-found: error
+          retention-days: 14

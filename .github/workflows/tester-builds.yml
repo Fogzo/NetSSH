@@ -1,0 +1,42 @@
+name: Build tester installers
+
+on:
+  workflow_dispatch:
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - run: npm ci
+      - run: npm run tauri -- build --target universal-apple-darwin --bundles dmg --no-sign --ci
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NetSSH-macOS-unsigned
+          path: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.1
+      - run: npm ci
+      - run: npm run tauri -- build --bundles nsis --no-sign --ci
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NetSSH-Windows-unsigned
+          path: src-tauri/target/release/bundle/nsis/*.exe
