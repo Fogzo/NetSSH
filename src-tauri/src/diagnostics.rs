@@ -312,12 +312,7 @@ fn collect_wifi_diagnostic() -> Result<WifiDiagnostic, String> {
         .args(["wlan", "show", "interfaces"])
         .output()
         .map_err(|error| format!("Unable to inspect Wi-Fi interfaces: {error}"))?;
-    let networks = Command::new("netsh")
-        .args(["wlan", "show", "networks", "mode=bssid"])
-        .output()
-        .map_err(|error| format!("Unable to scan nearby Wi-Fi networks: {error}"))?;
     let interface_text = String::from_utf8_lossy(&interfaces.stdout).into_owned();
-    let network_text = String::from_utf8_lossy(&networks.stdout).into_owned();
     if !interfaces.status.success() {
         return Err(String::from_utf8_lossy(&interfaces.stderr)
             .trim()
@@ -340,9 +335,11 @@ fn collect_wifi_diagnostic() -> Result<WifiDiagnostic, String> {
         tx_rate_mbps: None,
         rx_rate_mbps: None,
         security: None,
-        nearby_networks: parse_windows_networks(&network_text),
+        nearby_networks: Vec::new(),
         recommendations: Vec::new(),
-        raw_output: format!("{interface_text}\n\nNearby networks\n{network_text}"),
+        raw_output: format!(
+            "{interface_text}\n\nFast link check: nearby-network scanning is skipped to avoid blocking Windows WLAN diagnostics."
+        ),
         elapsed_ms: 0,
     };
     for line in interface_text.lines() {
@@ -371,60 +368,6 @@ fn collect_wifi_diagnostic() -> Result<WifiDiagnostic, String> {
     }
     result.recommendations = wifi_recommendations(&result);
     Ok(result)
-}
-
-#[cfg(target_os = "windows")]
-fn parse_windows_networks(text: &str) -> Vec<WifiNetwork> {
-    let mut networks = Vec::new();
-    let mut ssid = String::new();
-    let mut security = None;
-    let mut current: Option<WifiNetwork> = None;
-    for line in text.lines() {
-        let Some((key, value)) = field_value(line) else {
-            continue;
-        };
-        let lower = key.to_ascii_lowercase();
-        if lower.starts_with("ssid ") && !lower.starts_with("bssid ") {
-            if let Some(network) = current.take() {
-                networks.push(network);
-            }
-            ssid = value.into();
-            security = None;
-        } else if lower == "authentication" {
-            security = Some(value.into());
-            if let Some(network) = current.as_mut() {
-                network.security = security.clone();
-            }
-        } else if lower.starts_with("bssid ") {
-            if let Some(network) = current.take() {
-                networks.push(network);
-            }
-            current = Some(WifiNetwork {
-                ssid: ssid.clone(),
-                bssid: Some(value.into()),
-                signal_percent: None,
-                estimated_rssi_dbm: None,
-                channel: None,
-                radio_type: None,
-                security: security.clone(),
-            });
-        } else if let Some(network) = current.as_mut() {
-            match lower.as_str() {
-                "signal" => {
-                    network.signal_percent = percent_value(value);
-                    network.estimated_rssi_dbm = network.signal_percent.map(estimate_rssi);
-                }
-                "channel" => network.channel = Some(value.into()),
-                "radio type" => network.radio_type = Some(value.into()),
-                _ => {}
-            }
-        }
-    }
-    if let Some(network) = current {
-        networks.push(network);
-    }
-    networks.sort_by_key(|network| std::cmp::Reverse(network.signal_percent.unwrap_or(0)));
-    networks
 }
 
 #[cfg(target_os = "macos")]
@@ -564,9 +507,20 @@ fn collect_wifi_diagnostic() -> Result<WifiDiagnostic, String> {
 #[tauri::command]
 pub async fn run_wifi_diagnostic() -> Result<WifiDiagnostic, String> {
     let started = Instant::now();
-    let mut result = tauri::async_runtime::spawn_blocking(collect_wifi_diagnostic)
-        .await
-        .map_err(|error| error.to_string())??;
+    #[cfg(target_os = "windows")]
+    let maximum_duration = Duration::from_secs(6);
+    #[cfg(not(target_os = "windows"))]
+    let maximum_duration = Duration::from_secs(15);
+    let mut result = timeout(
+        maximum_duration,
+        tauri::async_runtime::spawn_blocking(collect_wifi_diagnostic),
+    )
+    .await
+    .map_err(|_| {
+        "Wi-Fi inspection timed out. Confirm the Windows WLAN AutoConfig service is running."
+            .to_string()
+    })?
+    .map_err(|error| error.to_string())??;
     result.elapsed_ms = started.elapsed().as_millis();
     Ok(result)
 }

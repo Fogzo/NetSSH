@@ -20,6 +20,8 @@ The native desktop app now opens real interactive SSH, Telnet, and Serial sessio
 
 To test a switch, add or edit the device in **Inventory**, select SSH, Telnet, or Serial, and enter the required connection details. Select **Connect** and verify the SSH SHA256 fingerprint against a trusted source the first time. The browser preview cannot create network terminal sessions; use `npm run desktop:dev` or a packaged desktop build. On macOS, Location Services may need to be enabled for network diagnostics before SSID and BSSID are available.
 
+Saved credentials are optional. Telnet and Serial open immediately and allow the device to present its normal login prompts in the terminal. SSH requires a username and authentication method before the SSH protocol can open a shell, so NetSSH asks for any missing SSH values in a one-time connection dialog instead of forcing an inventory edit. The password can optionally be saved in the operating-system vault.
+
 Phase 3 engineer workflows have also started. The workspace supports multiple independent tabs, side-by-side terminal panes, and a compact AI copilot beside a session. Attaching recent terminal context to AI requests is always opt-in.
 
 ## Test the AI assistant

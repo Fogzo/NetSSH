@@ -27,6 +27,8 @@ const statusLabel = { online: "Reachable", warning: "Attention", offline: "Offli
 type Appearance = "dark" | "light" | "system";
 type AppPreferences = { appearance: Appearance; compactWorkspace: boolean; showConnectionWarnings: boolean; defaultProtocol: ConnectionProtocol; sites: string[]; platforms: string[] };
 type AppNotification = { id: string; message: string; createdAt: number; read: boolean };
+type ConnectionCredentialRequest = { host: Host; username: string; requirePassword: boolean };
+type ConnectionCredentials = { username: string; password?: string; savePassword: boolean };
 const defaultPlatforms = ["Cisco IOS-XE", "Cisco NX-OS", "Arista EOS", "Juniper JunOS", "Palo Alto", "Fortinet FortiOS", "Linux", "Other"];
 const defaultSites = [...new Set(initialHosts.map((host) => host.site))].sort();
 const defaultPreferences: AppPreferences = { appearance: "dark", compactWorkspace: false, showConnectionWarnings: true, defaultProtocol: "ssh", sites: defaultSites, platforms: defaultPlatforms };
@@ -59,6 +61,8 @@ function App() {
   const [editingHost, setEditingHost] = useState<Host | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
+  const [connectionCredentialRequest, setConnectionCredentialRequest] = useState<ConnectionCredentialRequest | null>(null);
+  const connectionCredentialResolver = useRef<((credentials: ConnectionCredentials | null) => void) | null>(null);
   const [preferences, setPreferences] = useState<AppPreferences>(() => {
     try { return { ...defaultPreferences, ...JSON.parse(localStorage.getItem("netssh.preferences") ?? "{}") }; }
     catch { return defaultPreferences; }
@@ -116,9 +120,20 @@ function App() {
     return () => query.removeEventListener("change", update);
   }, []);
 
+  const requestConnectionCredentials = (request: ConnectionCredentialRequest) => new Promise<ConnectionCredentials | null>((resolve) => {
+    connectionCredentialResolver.current = resolve;
+    setConnectionCredentialRequest(request);
+  });
+
+  const resolveConnectionCredentials = (credentials: ConnectionCredentials | null) => {
+    connectionCredentialResolver.current?.(credentials);
+    connectionCredentialResolver.current = null;
+    setConnectionCredentialRequest(null);
+  };
+
   const connect = async (host: Host, forceNew = false): Promise<string | null> => {
     const protocol = host.protocol ?? "ssh";
-    const existing = sessions.find((session) => session.host.id === host.id);
+    const existing = sessions.find((session) => session.host.id === host.id && (session.connected || session.connectionState === "connecting"));
     if (existing && !forceNew) {
       setActiveSession(existing.id);
       setView("workspace");
@@ -126,15 +141,20 @@ function App() {
     } else {
       const id = `session-${host.id}-${Date.now()}`;
       if (isNativeApp()) {
-        if (protocol !== "serial" && !host.username?.trim()) {
-          notify(`Add a username for ${host.name} before connecting`);
-          setEditingHost(host);
-          return null;
-        }
-        if (protocol !== "serial" && !await hasDevicePassword(host.id)) {
-          notify(`Add a password for ${host.name} before connecting`);
-          setEditingHost(host);
-          return null;
+        let connectionUsername = host.username?.trim() ?? "";
+        let connectionPassword: string | undefined;
+        if (protocol === "ssh") {
+          const passwordStored = await hasDevicePassword(host.id);
+          if (!connectionUsername || !passwordStored) {
+            const credentials = await requestConnectionCredentials({ host, username: connectionUsername, requirePassword: !passwordStored });
+            if (!credentials) return null;
+            connectionUsername = credentials.username.trim();
+            connectionPassword = credentials.password;
+            if (credentials.savePassword && credentials.password) {
+              try { await saveDevicePassword(host.id, credentials.password); }
+              catch (caught) { notify(`Connected credential could not be saved: ${String(caught)}`); }
+            }
+          }
         }
         const port = protocol === "serial" ? undefined : host.port ?? (protocol === "telnet" ? 23 : 22);
         let trustedFingerprint: string | undefined;
@@ -160,19 +180,20 @@ function App() {
             connected: false,
             connectionState: "connecting",
             lines: [
-              { kind: "info", text: protocol === "serial" ? `Opening ${host.address} at ${host.baudRate ?? 9600} baud…` : `Connecting to ${host.username}@${host.address}:${port} over ${protocol.toUpperCase()}…` },
+              { kind: "info", text: protocol === "serial" ? `Opening ${host.address} at ${host.baudRate ?? 9600} baud…` : protocol === "telnet" && !connectionUsername ? `Connecting to ${host.address}:${port} over TELNET; enter credentials when prompted…` : `Connecting to ${connectionUsername}@${host.address}:${port} over ${protocol.toUpperCase()}…` },
               ...(protocol === "telnet" ? [{ kind: "warning" as const, text: "Telnet credentials and session traffic are not encrypted. Use only on a trusted management network." }] : []),
             ],
           }]);
           setActiveSession(id);
           setView("workspace");
-          await startTerminalSession({ sessionId: id, deviceId: host.id, protocol, target: host.address, port, baudRate: host.baudRate, username: host.username, trustedFingerprint });
+          await startTerminalSession({ sessionId: id, deviceId: host.id, protocol, target: host.address, port, baudRate: host.baudRate, username: connectionUsername, password: connectionPassword, trustedFingerprint });
           setHistory((current) => [{ id: crypto.randomUUID(), deviceId: host.id, deviceName: host.name, protocol, address: host.address, startedAt: Date.now(), success: true, detail: `${protocol.toUpperCase()} session connected` }, ...current].slice(0, 250));
           return id;
         } catch (caught) {
           const detail = String(caught);
-          setSessions((current) => current.filter((session) => session.id !== id));
-          setActiveSession((current) => current === id ? null : current);
+          setSessions((current) => current.map((session) => session.id === id
+            ? { ...session, connected: false, connectionState: "error", lines: [...session.lines, { kind: "warning", text: detail }] }
+            : session));
           setHistory((current) => [{ id: crypto.randomUUID(), deviceId: host.id, deviceName: host.name, protocol, address: host.address, startedAt: Date.now(), success: false, detail }, ...current].slice(0, 250));
           notify(detail);
           return null;
@@ -255,7 +276,7 @@ function App() {
             if (!activeSession) { notify("Open a device session before running a snippet"); setView("workspace"); return; }
             const target = sessions.find((session) => session.id === activeSession);
             if (!target?.connected) { notify("The selected session is not connected"); return; }
-            writeTerminal(activeSession, `${snippet.command}\r\n`).then(() => notify(`Sent ${snippet.name}`)).catch((caught) => notify(String(caught)));
+            writeTerminal(activeSession, `${snippet.command}${target.host.protocol === "serial" ? "\r" : "\r\n"}`).then(() => notify(`Sent ${snippet.name}`)).catch((caught) => notify(String(caught)));
             setView("workspace");
           }} />}
           {view === "assistant" && <AiAssistant notify={notify} />}
@@ -269,11 +290,12 @@ function App() {
         setDeviceHosts((current) => editingHost ? current.map((item) => item.id === host.id ? host : item) : [host, ...current]);
         if (password) {
           try { await saveDevicePassword(host.id, password); notify(`${host.name} saved with password`); }
-          catch (caught) { notify((caught as Error).message); }
+          catch (caught) { notify((caught as Error).message); return; }
         } else notify(`${host.name} ${editingHost ? "updated" : "added"}`);
         setAddDeviceOpen(false); setEditingHost(null); setView("inventory");
       }} />}
       {settingsOpen && <SettingsModal preferences={preferences} onClose={() => setSettingsOpen(false)} onSave={(next) => { setPreferences(next); setSettingsOpen(false); notify("Settings saved"); }} />}
+      {connectionCredentialRequest && <ConnectionCredentialsModal request={connectionCredentialRequest} onCancel={() => resolveConnectionCredentials(null)} onConnect={resolveConnectionCredentials} />}
       {toast && <div className="toast"><Check size={16} /> {toast}</div>}
     </div>
   );
@@ -475,16 +497,18 @@ function Terminal({ session, onCommand, autoFocus = true }: { session: Session; 
 
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    const clean = command.trim();
+    const passwordPrompt = /(?:password|passphrase|secret)\s*:\s*$/i.test(session.lines.slice(-3).map((line) => line.text).join("\n"));
+    const clean = passwordPrompt ? command : command.trim();
     if (!clean) return;
-    if (clean.toLowerCase() === "clear") onCommand([{ kind: "info", text: "— terminal cleared —" }]);
+    if (!passwordPrompt && clean.toLowerCase() === "clear") onCommand([{ kind: "info", text: "— terminal cleared —" }]);
     else if (!session.connected) onCommand([{ kind: "warning", text: "This session is not connected." }]);
     else void writeTerminal(session.id, `${clean}${session.host.protocol === "serial" ? "\r" : "\r\n"}`).catch((caught) => onCommand([{ kind: "warning", text: String(caught) }]));
     setCommand("");
   };
 
+  const passwordPrompt = /(?:password|passphrase|secret)\s*:\s*$/i.test(session.lines.slice(-3).map((line) => line.text).join("\n"));
   const stateLabel = session.connectionState === "connecting" ? "Connecting" : session.connected ? "Connected" : session.connectionState === "error" ? "Error" : "Closed";
-  return <div className="terminal"><div className="terminal-output">{session.lines.map((line, index) => <div className={`terminal-line ${line.kind}`} key={`${index}-${line.text}`}><span className="line-prefix">{line.kind === "command" ? `${session.host.name}#` : line.kind === "info" ? "●" : ""}</span><pre>{line.text}</pre></div>)}<div ref={bottomRef} /></div><form className="terminal-input" onSubmit={submit}><span>{session.host.name}#</span><input autoFocus={autoFocus} disabled={!session.connected} value={command} onChange={(event) => setCommand(event.target.value)} spellCheck={false} placeholder={session.connected ? "Type a command…" : "Session is not connected"} /><kbd>Enter</kbd></form><div className={`terminal-status ${session.connected ? "connected" : "disconnected"}`}><span><i /> {(session.host.protocol ?? "ssh").toUpperCase()} · {stateLabel}</span><span>UTF-8</span><span>{session.host.platform}</span></div></div>;
+  return <div className="terminal"><div className="terminal-output">{session.lines.map((line, index) => <div className={`terminal-line ${line.kind}`} key={`${index}-${line.text}`}><span className="line-prefix">{line.kind === "command" ? `${session.host.name}#` : line.kind === "info" ? "●" : ""}</span><pre>{line.text}</pre></div>)}<div ref={bottomRef} /></div><form className="terminal-input" onSubmit={submit}><span>{session.host.name}#</span><input autoFocus={autoFocus} type={passwordPrompt ? "password" : "text"} autoComplete="off" disabled={!session.connected} value={command} onChange={(event) => setCommand(event.target.value)} spellCheck={false} placeholder={session.connected ? passwordPrompt ? "Enter secret…" : "Type a command…" : "Session is not connected"} /><kbd>Enter</kbd></form><div className={`terminal-status ${session.connected ? "connected" : "disconnected"}`}><span><i /> {(session.host.protocol ?? "ssh").toUpperCase()} · {stateLabel}</span><span>UTF-8</span><span>{session.host.platform}</span></div></div>;
 }
 
 function Inventory({ hosts, onConnect, onAdd, onEdit, onFavorite, onDelete }: { hosts: Host[]; onConnect: (host: Host) => void; onAdd: () => void; onEdit: (host: Host) => void; onFavorite: (id: string) => void; onDelete: (id: string) => void }) {
@@ -530,6 +554,19 @@ function PasswordModal({ host, onClose, onSave }: { host: Host; onClose: () => v
   const [password, setPassword] = useState("");
   const [visible, setVisible] = useState(false);
   return <div className="modal-backdrop" onMouseDown={onClose}><section className="confirm-modal password-modal" onMouseDown={(event) => event.stopPropagation()}><span><KeyRound size={19} /></span><h3>Save password for {host.name}</h3><p>The password is written directly to your operating system credential vault.</p><div className="secret-input"><LockKeyhole size={15} /><input autoFocus type={visible ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" placeholder="Device password" /><button onClick={() => setVisible(!visible)}>{visible ? <EyeOff size={15} /> : <Eye size={15} />}</button></div><div className="password-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={!password} onClick={() => onSave(password)}>Save securely</button></div></section></div>;
+}
+
+function ConnectionCredentialsModal({ request, onCancel, onConnect }: { request: ConnectionCredentialRequest; onCancel: () => void; onConnect: (credentials: ConnectionCredentials) => void }) {
+  const [username, setUsername] = useState(request.username);
+  const [password, setPassword] = useState("");
+  const [visible, setVisible] = useState(false);
+  const [savePassword, setSavePassword] = useState(false);
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (!username.trim() || (request.requirePassword && !password)) return;
+    onConnect({ username: username.trim(), password: password || undefined, savePassword: Boolean(password) && savePassword });
+  };
+  return <div className="modal-backdrop" onMouseDown={onCancel}><form className="confirm-modal connection-credentials-modal" onSubmit={submit} onMouseDown={(event) => event.stopPropagation()}><span><KeyRound size={19} /></span><h3>Connect to {request.host.name}</h3><p>SSH requires authentication before the switch can open an interactive shell. These values can be used once without changing the inventory profile.</p><label><small>SSH username</small><div className="secret-input"><Router size={15} /><input autoFocus value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" placeholder="Network username" /></div></label>{request.requirePassword && <label><small>SSH password</small><div className="secret-input"><LockKeyhole size={15} /><input type={visible ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" placeholder="Device password" /><button type="button" onClick={() => setVisible(!visible)}>{visible ? <EyeOff size={15} /> : <Eye size={15} />}</button></div></label>}{request.requirePassword && <label className="connection-save"><input type="checkbox" checked={savePassword} onChange={(event) => setSavePassword(event.target.checked)} /><span>Save password in the operating-system vault</span></label>}<div className="password-actions"><button type="button" className="secondary-button" onClick={onCancel}>Cancel</button><button className="primary-button" disabled={!username.trim() || (request.requirePassword && !password)}>Connect</button></div></form></div>;
 }
 
 type ToolboxTool = "subnet" | "ping" | "dns" | "port" | "wifi";

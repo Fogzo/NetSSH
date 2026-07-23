@@ -30,6 +30,7 @@ export async function startTerminalSession(options: {
   port?: number;
   baudRate?: number;
   username?: string;
+  password?: string;
   trustedFingerprint?: string;
   columns?: number;
   rows?: number;
@@ -40,6 +41,7 @@ export async function startTerminalSession(options: {
     port: options.port ?? null,
     baudRate: options.baudRate ?? null,
     username: options.username ?? "",
+    password: options.password ?? null,
     columns: options.columns ?? 120,
     rows: options.rows ?? 36,
   });

@@ -15,3 +15,35 @@
   cursor: not-allowed;
   opacity: 0.55;
 }
+
+.connection-credentials-modal {
+  text-align: left;
+}
+
+.connection-credentials-modal > span {
+  margin-left: 0;
+}
+
+.connection-credentials-modal label {
+  display: block;
+  margin-top: 12px;
+}
+
+.connection-credentials-modal label > small {
+  display: block;
+  margin-bottom: 6px;
+  color: #83909c;
+}
+
+.connection-save {
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
+  color: #87949f;
+  font-size: 9px;
+}
+
+.connection-credentials-modal .password-actions {
+  justify-content: flex-end;
+  margin-top: 18px;
+}

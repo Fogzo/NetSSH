@@ -193,6 +193,7 @@ pub async fn start_terminal_session(
     port: Option<u16>,
     baud_rate: Option<u32>,
     username: String,
+    password: Option<String>,
     trusted_fingerprint: Option<String>,
     columns: u32,
     rows: u32,
@@ -202,18 +203,9 @@ pub async fn start_terminal_session(
     }
     let target = validate_target(&target, &protocol)?;
     let username = username.trim().to_owned();
-    let password =
-        if protocol == "serial" {
-            None
-        } else {
-            if username.is_empty() {
-                return Err("Add a username to this device before connecting".into());
-            }
-            Some(super::device_entry(&device_id)?.get_password().map_err(|_| {
-            "No password is stored for this device. Edit it in Inventory or Credentials."
-                .to_string()
-        })?)
-        };
+    let password = password
+        .filter(|value| !value.is_empty())
+        .or_else(|| super::device_entry(&device_id).ok()?.get_password().ok());
 
     if manager.sessions.lock().await.contains_key(&session_id) {
         return Err("A terminal session with this identifier already exists".into());
@@ -222,6 +214,12 @@ pub async fn start_terminal_session(
     let (sender, receiver) = mpsc::channel(64);
     match protocol.as_str() {
         "ssh" => {
+            if username.is_empty() {
+                return Err("SSH requires a username before authentication can begin".into());
+            }
+            let password = password.as_deref().ok_or_else(|| {
+                "SSH requires a password before the remote shell can open".to_string()
+            })?;
             let port = validate_port(port.unwrap_or(22))?;
             let expected = trusted_fingerprint
                 .filter(|fingerprint| !fingerprint.trim().is_empty())
@@ -239,13 +237,12 @@ pub async fn start_terminal_session(
             .map_err(|_| format!("SSH connection to {target}:{port} timed out"))?
             .map_err(|error| format!("SSH connection to {target}:{port} failed: {error}"))?;
             let authentication = handle
-                .authenticate_password(&username, password.as_deref().unwrap_or_default())
+                .authenticate_password(&username, password)
                 .await
                 .map_err(|error| format!("SSH authentication failed: {error}"))?;
             if !authentication.success() {
                 return Err(
-                    "SSH authentication was rejected. Check the username and stored password."
-                        .into(),
+                    "SSH authentication was rejected. Check the username and password.".into(),
                 );
             }
             let channel = handle
@@ -300,8 +297,8 @@ pub async fn start_terminal_session(
                 session_id,
                 stream,
                 receiver,
-                username,
-                password.unwrap_or_default(),
+                (!username.is_empty()).then_some(username),
+                password,
             ));
         }
         "serial" => {
@@ -445,8 +442,8 @@ async fn run_telnet_session(
     session_id: String,
     stream: TcpStream,
     mut receiver: mpsc::Receiver<TerminalAction>,
-    username: String,
-    password: String,
+    username: Option<String>,
+    password: Option<String>,
 ) {
     let (mut reader, mut writer) = stream.into_split();
     let mut buffer = [0_u8; 4096];
@@ -486,13 +483,13 @@ async fn run_telnet_session(
                             prompt_buffer = prompt_buffer[prompt_buffer.len() - 256..].to_owned();
                         }
                         emit_terminal(&app, &session_id, "data", output);
-                        if !username_sent && (prompt_buffer.contains("username:") || prompt_buffer.contains("login:")) {
-                            let _ = writer.write_all(format!("{username}\r\n").as_bytes()).await;
+                        if !username_sent && username.is_some() && (prompt_buffer.contains("username:") || prompt_buffer.contains("login:")) {
+                            let _ = writer.write_all(format!("{}\r\n", username.as_deref().unwrap_or_default()).as_bytes()).await;
                             username_sent = true;
                             prompt_buffer.clear();
                         }
-                        if !password_sent && prompt_buffer.contains("password:") {
-                            let _ = writer.write_all(format!("{password}\r\n").as_bytes()).await;
+                        if !password_sent && password.is_some() && prompt_buffer.contains("password:") {
+                            let _ = writer.write_all(format!("{}\r\n", password.as_deref().unwrap_or_default()).as_bytes()).await;
                             password_sent = true;
                             prompt_buffer.clear();
                         }
