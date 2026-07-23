@@ -3,6 +3,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::Duration;
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 
 mod diagnostics;
 mod ssh;
@@ -14,6 +15,35 @@ const NETWORK_SYSTEM_PROMPT: &str = "You are NetSSH Copilot, an assistant for pr
 #[tauri::command]
 fn platform_name() -> &'static str {
     std::env::consts::OS
+}
+
+#[tauri::command]
+fn open_ai_webview(app: tauri::AppHandle, provider: String) -> Result<(), String> {
+    let (label, title, url) = match provider.as_str() {
+        "openai" => ("ai-chatgpt", "ChatGPT · NetSSH", "https://chatgpt.com/"),
+        "gemini" => (
+            "ai-gemini",
+            "Gemini · NetSSH",
+            "https://gemini.google.com/app",
+        ),
+        _ => return Err("Unsupported AI web provider".into()),
+    };
+    if let Some(window) = app.get_webview_window(label) {
+        window.show().map_err(|error| error.to_string())?;
+        window.set_focus().map_err(|error| error.to_string())?;
+        return Ok(());
+    }
+    let external_url = url
+        .parse()
+        .map_err(|error| format!("Invalid AI provider URL: {error}"))?;
+    WebviewWindowBuilder::new(&app, label, WebviewUrl::External(external_url))
+        .title(title)
+        .inner_size(1120.0, 820.0)
+        .min_inner_size(760.0, 560.0)
+        .center()
+        .build()
+        .map_err(|error| format!("Unable to open the in-app AI view: {error}"))?;
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -213,8 +243,10 @@ fn api_error(provider: &str, status: u16, body: &Value) -> String {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .manage(ssh::TerminalManager::default())
         .invoke_handler(tauri::generate_handler![
             platform_name,
+            open_ai_webview,
             save_ai_key,
             has_ai_key,
             delete_ai_key,
@@ -226,7 +258,13 @@ pub fn run() {
             diagnostics::run_trace,
             diagnostics::run_dns_lookup,
             diagnostics::run_port_check,
-            ssh::connection_preflight
+            diagnostics::run_wifi_diagnostic,
+            ssh::connection_preflight,
+            ssh::probe_ssh_host_key,
+            ssh::start_terminal_session,
+            ssh::write_terminal,
+            ssh::resize_terminal,
+            ssh::close_terminal
         ])
         .run(tauri::generate_context!())
         .expect("error while running NetSSH");

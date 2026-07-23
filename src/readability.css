@@ -1,0 +1,29 @@
+:root{font-size:16px;line-height:1.45}
+body{font-size:14px}
+button,input,textarea,select{font-family:inherit}
+.terminal,.terminal-input input,.binary-value,.protocol-pill,.wifi-signal>strong,.wifi-identity small,.wifi-metrics strong,.nearby-row,.wifi-raw pre,.wifi-thresholds span{font-family:"SFMono-Regular",Consolas,"Liberation Mono",monospace}
+.nav-item{font-size:13px}.nav-label{font-size:10px}.search-button span{font-size:13px}
+.topbar h1{font-size:16px}.breadcrumb,.mini-search{font-size:11px}
+.page-intro h2{font-size:24px}.page-intro p,.hero-copy p{font-size:13px}
+.section-heading h3,.panel-title h3{font-size:14px}.section-heading p,.panel-title p{font-size:11px}
+.primary-button,.secondary-button{font-size:12px}
+.device-card>strong{font-size:12px}.device-card>code,.device-meta,.device-footer{font-size:10px}
+.table-row,.history-row,.credential-row{font-size:11px}.table-head,.history-head,.credential-head{font-size:9px}
+.table-device>span:last-child small,.history-row small,.credential-row small{font-size:9px}
+.filter-bar>button,.input-wrap input,.select-wrap select{font-size:11px}
+.tool-tabs button{font-size:11px}.calculator-form label,.diagnostic-form label>span{font-size:10px}
+.quick-tools strong,.result-item code,.capacity-row strong{font-size:11px}.quick-tools small,.result-item>span,.capacity-row span{font-size:9px}
+.diagnostic-form input,.diagnostic-form .primary-button{font-size:11px}.diagnostic-output pre{font-size:10px}.output-head,.output-empty span{font-size:9px}.output-empty strong{font-size:11px}
+.snippet-card h3{font-size:14px}.snippet-card>p,.snippet-card>code,.snippet-card>div:last-child button{font-size:10px}.vendor-tag,.category-tag{font-size:9px}
+.assistant-title h2{font-size:15px}.assistant-title p,.provider-select select{font-size:10px}.assistant-notice{font-size:10px}
+.message-meta strong{font-size:10px}.message-meta span{font-size:9px}.message-bubble{font-size:12px}.message-bubble code{font-size:11px}
+.prompt-suggestions button{font-size:10px}.chat-composer textarea{font:12px/1.55 inherit}.chat-composer>div>span{font-size:9px}
+.context-heading strong,.provider-options strong,.provider-form label{font-size:10px}.context-heading small,.provider-options small,.context-empty small{font-size:9px}
+.provider-card>button,.web-mode-button strong,.provider-form>p,.provider-form>a{font-size:10px}.web-mode-button small{font-size:9px}
+.form-grid label>span,.settings-select strong,.settings-toggle strong,.config-list>div:first-child strong{font-size:10px}
+.form-grid input,.form-grid select,.form-grid textarea,.settings-select select,.config-add input,.config-add button{font-size:11px}
+.settings-select small,.settings-toggle small,.config-list>div:first-child small,.form-security,.settings-security{font-size:9px}
+.session-tab,.terminal-toolbar strong{font-size:11px}.terminal-toolbar,.terminal-input span,.terminal-input input{font-size:10px}.terminal-line{font-size:12px}.terminal-status{font-size:9px}
+.workspace-ai-head strong{font-size:10px}.workspace-ai-head small,.workspace-ai-notice,.side-composer label{font-size:9px}.side-chat-scroll .message-bubble,.side-composer textarea{font:10px/1.5 inherit}
+.wifi-metrics strong,.nearby-row{font-size:10px}.wifi-metrics span,.wifi-metrics small,.wifi-advice p,.wifi-thresholds span,.wifi-privacy p{font-size:9px}
+@media(max-width:760px){.page{padding:18px}.page-intro h2{font-size:21px}}

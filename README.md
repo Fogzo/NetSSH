@@ -7,8 +7,8 @@ NetSSH is a modern, network-engineer-first SSH workspace for Windows and macOS, 
 - Device-centric multi-tab workspace with split terminals, optional AI side panel, favourites, and connection history
 - Searchable, editable inventory with SSH, Telnet, and Serial connection profiles
 - Interactive IPv4 subnet calculator with binary and capacity views
-- Native ping, traceroute, DNS, and TCP port diagnostics
-- Reusable, vendor-aware command snippets
+- Native ping, traceroute, DNS, TCP port, and Wi-Fi health diagnostics
+- Locally stored, searchable, editable command snippets with Cisco IOS/IOS-XE and NX-OS defaults
 - Network-focused AI copilot with OpenAI, Gemini, and offline demo modes
 - Native OS credential storage for provider API keys and device passwords
 - Global command palette (`Cmd/Ctrl + K`)
@@ -16,9 +16,9 @@ NetSSH is a modern, network-engineer-first SSH workspace for Windows and macOS, 
 - Persistent light, dark, and operating-system appearance modes
 - Local-first security concept with no required cloud account
 
-The terminal currently provides an interactive product demonstration. The native SSH transport and device persistence are the next backend milestone.
+The native desktop app now opens real interactive SSH, Telnet, and Serial sessions. SSH uses password authentication from the operating-system vault, requests an interactive PTY, verifies the server fingerprint on every connection, and warns when a saved host key changes. Telnet performs protocol negotiation and supplies the saved username and password when the device presents login prompts. Serial streams directly to local COM or `/dev/cu.*` ports at the configured baud rate.
 
-Phase 2 has started with a pinned Rust toolchain, Windows/macOS CI, native diagnostics, OS-backed device-password storage, and protocol-aware preflights. SSH validates reachability and reads the server identification banner, Telnet validates the TCP service, and Serial opens the selected system port at the configured baud rate. Authentication, known-host verification, and interactive SSH/Telnet/Serial channels are not yet enabled; the interface reports this explicitly rather than simulating trust.
+To test a switch, add or edit the device in **Inventory**, select SSH, Telnet, or Serial, and enter the required connection details. Select **Connect** and verify the SSH SHA256 fingerprint against a trusted source the first time. The browser preview cannot create network terminal sessions; use `npm run desktop:dev` or a packaged desktop build. On macOS, Location Services may need to be enabled for network diagnostics before SSID and BSSID are available.
 
 Phase 3 engineer workflows have also started. The workspace supports multiple independent tabs, side-by-side terminal panes, and a compact AI copilot beside a session. Attaching recent terminal context to AI requests is always opt-in.
 
@@ -27,9 +27,9 @@ Phase 3 engineer workflows have also started. The workspace supports multiple in
 1. Run `npm run dev` and open `http://127.0.0.1:1420`.
 2. Select **AI assistant** in the left navigation.
 3. Keep **NetSSH Demo** selected to test the complete chat workflow offline.
-4. In the native desktop app, choose OpenAI or Gemini and open **Provider settings** to add an API key.
+4. In the native desktop app, choose OpenAI or Gemini and open **Provider settings** to add an API key for integrated context, or launch the provider in a dedicated NetSSH window.
 
-Users who prefer their existing ChatGPT or Gemini subscription can choose **Open ChatGPT web** or **Open Gemini web**. This launches the provider's own website so the provider handles sign-in directly. Web mode does not receive NetSSH terminal context; API mode remains available for integrated, redacted device assistance.
+Users who prefer their existing ChatGPT or Gemini subscription can choose **ChatGPT in NetSSH** or **Gemini in NetSSH**. This opens an isolated provider webview window inside the desktop application, where the provider handles sign-in and session storage directly. Web mode does not receive NetSSH terminal context; API mode remains available for integrated, redacted device assistance. Some identity providers may still require the system browser during sign-in because embedded authentication is restricted by their security policy.
 
 Provider credentials and device passwords are only accepted by the native Tauri app and are stored in the operating system credential vault. The browser preview deliberately refuses to save secrets. OpenAI API access is separate from a ChatGPT subscription, and Google Gemini API access is separate from the consumer Gemini application.
 
@@ -86,7 +86,7 @@ The product UI and network calculations stay platform-independent. Native respon
 
 See [ROADMAP.md](ROADMAP.md) for delivery phases and current status.
 
-1. Native SSH engine with password, key, agent, and jump-host support
+1. Native SSH engine — password sessions implemented; key, agent, and jump-host support remain
 2. OS-backed encrypted credential vault and known-host verification — AI keys and device passwords implemented
 3. SQLite inventory, tags, folders, imports, and backups — persistent device inventory, tags, sites, filters, and duplicate validation implemented; SQLite migration remains
 4. Real terminal emulation, split panes, session logging, and SFTP

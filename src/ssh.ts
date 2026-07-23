@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type { ConnectionProtocol } from "./types";
 
@@ -9,6 +10,55 @@ export interface ConnectionPreflightResult {
 }
 
 const isTauri = () => "__TAURI_INTERNALS__" in window;
+
+export interface TerminalEvent {
+  sessionId: string;
+  kind: "connected" | "data" | "info" | "error" | "closed";
+  data: string;
+}
+
+export async function probeSshHostKey(target: string, port: number): Promise<string> {
+  const result = await invoke<{ fingerprint: string }>("probe_ssh_host_key", { target, port });
+  return result.fingerprint;
+}
+
+export async function startTerminalSession(options: {
+  sessionId: string;
+  deviceId: string;
+  protocol: ConnectionProtocol;
+  target: string;
+  port?: number;
+  baudRate?: number;
+  username?: string;
+  trustedFingerprint?: string;
+  columns?: number;
+  rows?: number;
+}): Promise<void> {
+  await invoke("start_terminal_session", {
+    ...options,
+    trustedFingerprint: options.trustedFingerprint ?? null,
+    port: options.port ?? null,
+    baudRate: options.baudRate ?? null,
+    username: options.username ?? "",
+    columns: options.columns ?? 120,
+    rows: options.rows ?? 36,
+  });
+}
+
+export async function writeTerminal(sessionId: string, data: string): Promise<void> {
+  if (!isTauri()) throw new Error("Interactive terminals are available in the desktop app");
+  await invoke("write_terminal", { sessionId, data });
+}
+
+export async function closeTerminal(sessionId: string): Promise<void> {
+  if (!isTauri()) return;
+  await invoke("close_terminal", { sessionId });
+}
+
+export async function listenForTerminalEvents(handler: (event: TerminalEvent) => void): Promise<UnlistenFn> {
+  if (!isTauri()) return () => undefined;
+  return listen<TerminalEvent>("terminal-event", (event) => handler(event.payload));
+}
 
 export async function preflightConnection(protocol: ConnectionProtocol, target: string, port?: number, baudRate?: number): Promise<ConnectionPreflightResult> {
   if (!isTauri()) {

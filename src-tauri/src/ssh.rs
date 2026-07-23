@@ -1,7 +1,14 @@
+use russh::client;
+use russh::keys::ssh_key::PublicKey;
 use serde::Serialize;
+use std::collections::HashMap;
+use std::io::{ErrorKind, Read, Write};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::AsyncReadExt;
+use tauri::{AppHandle, Emitter, State};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::{mpsc, Mutex};
 use tokio::time::timeout;
 
 #[derive(Serialize)]
@@ -10,6 +17,57 @@ pub struct ConnectionPreflightResult {
     reachable: bool,
     banner: Option<String>,
     elapsed_ms: u128,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SshHostKey {
+    fingerprint: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TerminalEvent {
+    session_id: String,
+    kind: &'static str,
+    data: String,
+}
+
+enum TerminalAction {
+    Data(Vec<u8>),
+    Resize { columns: u32, rows: u32 },
+    Close,
+}
+
+#[derive(Clone, Default)]
+pub struct TerminalManager {
+    sessions: Arc<Mutex<HashMap<String, mpsc::Sender<TerminalAction>>>>,
+}
+
+#[derive(Clone)]
+struct SshHandler {
+    expected_fingerprint: Option<String>,
+    observed_fingerprint: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl client::Handler for SshHandler {
+    type Error = russh::Error;
+
+    async fn check_server_key(
+        &mut self,
+        server_public_key: &PublicKey,
+    ) -> Result<bool, Self::Error> {
+        let fingerprint = server_public_key
+            .fingerprint(Default::default())
+            .to_string();
+        if let Ok(mut observed) = self.observed_fingerprint.lock() {
+            *observed = Some(fingerprint.clone());
+        }
+        Ok(self
+            .expected_fingerprint
+            .as_ref()
+            .is_none_or(|expected| expected == &fingerprint))
+    }
 }
 
 fn validate_target(target: &str, protocol: &str) -> Result<String, String> {
@@ -27,14 +85,38 @@ fn validate_target(target: &str, protocol: &str) -> Result<String, String> {
     Ok(target.to_owned())
 }
 
+fn validate_port(port: u16) -> Result<u16, String> {
+    if port == 0 {
+        Err("Port must be between 1 and 65535".into())
+    } else {
+        Ok(port)
+    }
+}
+
+fn emit_terminal(app: &AppHandle, session_id: &str, kind: &'static str, data: impl Into<String>) {
+    let _ = app.emit(
+        "terminal-event",
+        TerminalEvent {
+            session_id: session_id.to_owned(),
+            kind,
+            data: data.into(),
+        },
+    );
+}
+
+fn ssh_config() -> Arc<client::Config> {
+    Arc::new(client::Config {
+        inactivity_timeout: Some(Duration::from_secs(60 * 30)),
+        ..Default::default()
+    })
+}
+
 async fn tcp_preflight(
     protocol: &str,
     target: String,
     port: u16,
 ) -> Result<ConnectionPreflightResult, String> {
-    if port == 0 {
-        return Err("Port must be between 1 and 65535".into());
-    }
+    let port = validate_port(port)?;
     let address = format!("{target}:{port}");
     let started = Instant::now();
     let mut stream = timeout(Duration::from_secs(5), TcpStream::connect(&address))
@@ -73,6 +155,478 @@ async fn tcp_preflight(
 }
 
 #[tauri::command]
+pub async fn probe_ssh_host_key(target: String, port: u16) -> Result<SshHostKey, String> {
+    let target = validate_target(&target, "ssh")?;
+    let port = validate_port(port)?;
+    let observed_fingerprint = Arc::new(std::sync::Mutex::new(None));
+    let handler = SshHandler {
+        expected_fingerprint: None,
+        observed_fingerprint: observed_fingerprint.clone(),
+    };
+    let session = timeout(
+        Duration::from_secs(8),
+        client::connect(ssh_config(), (target.as_str(), port), handler),
+    )
+    .await
+    .map_err(|_| format!("SSH handshake with {target}:{port} timed out"))?
+    .map_err(|error| format!("SSH handshake with {target}:{port} failed: {error}"))?;
+    let _ = session
+        .disconnect(russh::Disconnect::ByApplication, "Host key probe", "en")
+        .await;
+    let fingerprint = observed_fingerprint
+        .lock()
+        .map_err(|_| "Unable to read the SSH host key".to_string())?
+        .clone()
+        .ok_or_else(|| "The SSH server did not provide a host key".to_string())?;
+    Ok(SshHostKey { fingerprint })
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn start_terminal_session(
+    app: AppHandle,
+    manager: State<'_, TerminalManager>,
+    session_id: String,
+    device_id: String,
+    protocol: String,
+    target: String,
+    port: Option<u16>,
+    baud_rate: Option<u32>,
+    username: String,
+    trusted_fingerprint: Option<String>,
+    columns: u32,
+    rows: u32,
+) -> Result<(), String> {
+    if !matches!(protocol.as_str(), "ssh" | "telnet" | "serial") {
+        return Err("Unsupported interactive terminal protocol".into());
+    }
+    let target = validate_target(&target, &protocol)?;
+    let username = username.trim().to_owned();
+    let password =
+        if protocol == "serial" {
+            None
+        } else {
+            if username.is_empty() {
+                return Err("Add a username to this device before connecting".into());
+            }
+            Some(super::device_entry(&device_id)?.get_password().map_err(|_| {
+            "No password is stored for this device. Edit it in Inventory or Credentials."
+                .to_string()
+        })?)
+        };
+
+    if manager.sessions.lock().await.contains_key(&session_id) {
+        return Err("A terminal session with this identifier already exists".into());
+    }
+
+    let (sender, receiver) = mpsc::channel(64);
+    match protocol.as_str() {
+        "ssh" => {
+            let port = validate_port(port.unwrap_or(22))?;
+            let expected = trusted_fingerprint
+                .filter(|fingerprint| !fingerprint.trim().is_empty())
+                .ok_or_else(|| "Trust the SSH host key before connecting".to_string())?;
+            let observed = Arc::new(std::sync::Mutex::new(None));
+            let handler = SshHandler {
+                expected_fingerprint: Some(expected),
+                observed_fingerprint: observed,
+            };
+            let mut handle = timeout(
+                Duration::from_secs(10),
+                client::connect(ssh_config(), (target.as_str(), port), handler),
+            )
+            .await
+            .map_err(|_| format!("SSH connection to {target}:{port} timed out"))?
+            .map_err(|error| format!("SSH connection to {target}:{port} failed: {error}"))?;
+            let authentication = handle
+                .authenticate_password(&username, password.as_deref().unwrap_or_default())
+                .await
+                .map_err(|error| format!("SSH authentication failed: {error}"))?;
+            if !authentication.success() {
+                return Err(
+                    "SSH authentication was rejected. Check the username and stored password."
+                        .into(),
+                );
+            }
+            let channel = handle
+                .channel_open_session()
+                .await
+                .map_err(|error| format!("Unable to open the SSH terminal: {error}"))?;
+            channel
+                .request_pty(
+                    false,
+                    "xterm-256color",
+                    columns.max(20),
+                    rows.max(5),
+                    0,
+                    0,
+                    &[],
+                )
+                .await
+                .map_err(|error| {
+                    format!("The SSH server rejected the terminal request: {error}")
+                })?;
+            channel.request_shell(false).await.map_err(|error| {
+                format!("The SSH server rejected the interactive shell: {error}")
+            })?;
+            manager
+                .sessions
+                .lock()
+                .await
+                .insert(session_id.clone(), sender);
+            let sessions = manager.sessions.clone();
+            tokio::spawn(run_ssh_session(
+                app, sessions, session_id, handle, channel, receiver,
+            ));
+        }
+        "telnet" => {
+            let port = validate_port(port.unwrap_or(23))?;
+            let stream = timeout(
+                Duration::from_secs(10),
+                TcpStream::connect((target.as_str(), port)),
+            )
+            .await
+            .map_err(|_| format!("Telnet connection to {target}:{port} timed out"))?
+            .map_err(|error| format!("Telnet connection to {target}:{port} failed: {error}"))?;
+            manager
+                .sessions
+                .lock()
+                .await
+                .insert(session_id.clone(), sender);
+            let sessions = manager.sessions.clone();
+            tokio::spawn(run_telnet_session(
+                app,
+                sessions,
+                session_id,
+                stream,
+                receiver,
+                username,
+                password.unwrap_or_default(),
+            ));
+        }
+        "serial" => {
+            let rate = baud_rate.unwrap_or(9_600);
+            let display_target = target.clone();
+            let serial = serialport::new(&target, rate)
+                .timeout(Duration::from_millis(100))
+                .open()
+                .map_err(|error| format!("Unable to open serial port {target}: {error}"))?;
+            manager
+                .sessions
+                .lock()
+                .await
+                .insert(session_id.clone(), sender);
+            let sessions = manager.sessions.clone();
+            tokio::task::spawn_blocking(move || {
+                run_serial_session(
+                    app,
+                    sessions,
+                    session_id,
+                    display_target,
+                    rate,
+                    serial,
+                    receiver,
+                )
+            });
+        }
+        _ => unreachable!(),
+    }
+    Ok(())
+}
+
+fn run_serial_session(
+    app: AppHandle,
+    sessions: Arc<Mutex<HashMap<String, mpsc::Sender<TerminalAction>>>>,
+    session_id: String,
+    target: String,
+    baud_rate: u32,
+    mut serial: Box<dyn serialport::SerialPort>,
+    mut receiver: mpsc::Receiver<TerminalAction>,
+) {
+    emit_terminal(
+        &app,
+        &session_id,
+        "connected",
+        format!("Serial console connected to {target} at {baud_rate} baud"),
+    );
+    let mut buffer = [0_u8; 4096];
+    'session: loop {
+        loop {
+            match receiver.try_recv() {
+                Ok(TerminalAction::Data(data)) => {
+                    if let Err(error) = serial.write_all(&data) {
+                        emit_terminal(
+                            &app,
+                            &session_id,
+                            "error",
+                            format!("Unable to write to serial console: {error}"),
+                        );
+                        break 'session;
+                    }
+                    let _ = serial.flush();
+                }
+                Ok(TerminalAction::Resize { .. }) => {}
+                Ok(TerminalAction::Close) | Err(mpsc::error::TryRecvError::Disconnected) => {
+                    break 'session;
+                }
+                Err(mpsc::error::TryRecvError::Empty) => break,
+            }
+        }
+        match serial.read(&mut buffer) {
+            Ok(count) if count > 0 => emit_terminal(
+                &app,
+                &session_id,
+                "data",
+                String::from_utf8_lossy(&buffer[..count]).into_owned(),
+            ),
+            Ok(_) => {}
+            Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {}
+            Err(error) => {
+                emit_terminal(
+                    &app,
+                    &session_id,
+                    "error",
+                    format!("Serial console error: {error}"),
+                );
+                break;
+            }
+        }
+    }
+    tauri::async_runtime::block_on(async { sessions.lock().await.remove(&session_id) });
+    emit_terminal(&app, &session_id, "closed", "Serial console closed");
+}
+
+async fn run_ssh_session(
+    app: AppHandle,
+    sessions: Arc<Mutex<HashMap<String, mpsc::Sender<TerminalAction>>>>,
+    session_id: String,
+    handle: client::Handle<SshHandler>,
+    mut channel: russh::Channel<client::Msg>,
+    mut receiver: mpsc::Receiver<TerminalAction>,
+) {
+    emit_terminal(&app, &session_id, "connected", "SSH session connected");
+    loop {
+        tokio::select! {
+            action = receiver.recv() => match action {
+                Some(TerminalAction::Data(data)) => {
+                    if let Err(error) = channel.data(data.as_slice()).await {
+                        emit_terminal(&app, &session_id, "error", format!("Unable to write to SSH session: {error}"));
+                        break;
+                    }
+                }
+                Some(TerminalAction::Resize { columns, rows }) => {
+                    let _ = channel.window_change(columns.max(20), rows.max(5), 0, 0).await;
+                }
+                Some(TerminalAction::Close) | None => break,
+            },
+            message = channel.wait() => match message {
+                Some(russh::ChannelMsg::Data { data }) | Some(russh::ChannelMsg::ExtendedData { data, .. }) => {
+                    emit_terminal(&app, &session_id, "data", String::from_utf8_lossy(&data).into_owned());
+                }
+                Some(russh::ChannelMsg::ExitStatus { exit_status }) => {
+                    emit_terminal(&app, &session_id, "info", format!("Remote shell exited with status {exit_status}"));
+                }
+                Some(russh::ChannelMsg::Eof) | Some(russh::ChannelMsg::Close) | None => break,
+                _ => {}
+            }
+        }
+    }
+    let _ = channel.close().await;
+    let _ = handle
+        .disconnect(russh::Disconnect::ByApplication, "Session closed", "en")
+        .await;
+    sessions.lock().await.remove(&session_id);
+    emit_terminal(&app, &session_id, "closed", "SSH session closed");
+}
+
+async fn run_telnet_session(
+    app: AppHandle,
+    sessions: Arc<Mutex<HashMap<String, mpsc::Sender<TerminalAction>>>>,
+    session_id: String,
+    stream: TcpStream,
+    mut receiver: mpsc::Receiver<TerminalAction>,
+    username: String,
+    password: String,
+) {
+    let (mut reader, mut writer) = stream.into_split();
+    let mut buffer = [0_u8; 4096];
+    let mut parser = TelnetParser::default();
+    let mut username_sent = false;
+    let mut password_sent = false;
+    let mut prompt_buffer = String::new();
+    emit_terminal(&app, &session_id, "connected", "Telnet session connected");
+    loop {
+        tokio::select! {
+            action = receiver.recv() => match action {
+                Some(TerminalAction::Data(data)) => {
+                    if let Err(error) = writer.write_all(&data).await {
+                        emit_terminal(&app, &session_id, "error", format!("Unable to write to Telnet session: {error}"));
+                        break;
+                    }
+                }
+                Some(TerminalAction::Resize { .. }) => {}
+                Some(TerminalAction::Close) | None => break,
+            },
+            read = reader.read(&mut buffer) => match read {
+                Ok(0) => break,
+                Ok(count) => {
+                    let parsed = parser.consume(&buffer[..count]);
+                    if !parsed.reply.is_empty() && writer.write_all(&parsed.reply).await.is_err() {
+                        break;
+                    }
+                    if !parsed.output.is_empty() {
+                        let output = String::from_utf8_lossy(&parsed.output).into_owned();
+                        prompt_buffer.extend(
+                            output
+                                .chars()
+                                .filter(char::is_ascii)
+                                .map(|character| character.to_ascii_lowercase()),
+                        );
+                        if prompt_buffer.len() > 256 {
+                            prompt_buffer = prompt_buffer[prompt_buffer.len() - 256..].to_owned();
+                        }
+                        emit_terminal(&app, &session_id, "data", output);
+                        if !username_sent && (prompt_buffer.contains("username:") || prompt_buffer.contains("login:")) {
+                            let _ = writer.write_all(format!("{username}\r\n").as_bytes()).await;
+                            username_sent = true;
+                            prompt_buffer.clear();
+                        }
+                        if !password_sent && prompt_buffer.contains("password:") {
+                            let _ = writer.write_all(format!("{password}\r\n").as_bytes()).await;
+                            password_sent = true;
+                            prompt_buffer.clear();
+                        }
+                    }
+                }
+                Err(error) => {
+                    emit_terminal(&app, &session_id, "error", format!("Telnet connection error: {error}"));
+                    break;
+                }
+            }
+        }
+    }
+    let _ = writer.shutdown().await;
+    sessions.lock().await.remove(&session_id);
+    emit_terminal(&app, &session_id, "closed", "Telnet session closed");
+}
+
+#[derive(Default)]
+struct TelnetParser {
+    state: TelnetState,
+}
+
+#[derive(Default)]
+enum TelnetState {
+    #[default]
+    Data,
+    Command,
+    Option(u8),
+    Subnegotiation,
+    SubnegotiationCommand,
+}
+
+struct TelnetParseResult {
+    output: Vec<u8>,
+    reply: Vec<u8>,
+}
+
+impl TelnetParser {
+    fn consume(&mut self, bytes: &[u8]) -> TelnetParseResult {
+        const IAC: u8 = 255;
+        const DONT: u8 = 254;
+        const DO: u8 = 253;
+        const WONT: u8 = 252;
+        const WILL: u8 = 251;
+        const SB: u8 = 250;
+        const SE: u8 = 240;
+        let mut output = Vec::with_capacity(bytes.len());
+        let mut reply = Vec::new();
+        for &byte in bytes {
+            self.state = match self.state {
+                TelnetState::Data if byte == IAC => TelnetState::Command,
+                TelnetState::Data => {
+                    output.push(byte);
+                    TelnetState::Data
+                }
+                TelnetState::Command if byte == IAC => {
+                    output.push(IAC);
+                    TelnetState::Data
+                }
+                TelnetState::Command if matches!(byte, DO | DONT | WILL | WONT) => {
+                    TelnetState::Option(byte)
+                }
+                TelnetState::Command if byte == SB => TelnetState::Subnegotiation,
+                TelnetState::Command => TelnetState::Data,
+                TelnetState::Option(command) => {
+                    let response = if matches!(command, DO | DONT) {
+                        WONT
+                    } else {
+                        DONT
+                    };
+                    reply.extend_from_slice(&[IAC, response, byte]);
+                    TelnetState::Data
+                }
+                TelnetState::Subnegotiation if byte == IAC => TelnetState::SubnegotiationCommand,
+                TelnetState::Subnegotiation => TelnetState::Subnegotiation,
+                TelnetState::SubnegotiationCommand if byte == SE => TelnetState::Data,
+                TelnetState::SubnegotiationCommand => TelnetState::Subnegotiation,
+            };
+        }
+        TelnetParseResult { output, reply }
+    }
+}
+
+#[tauri::command]
+pub async fn write_terminal(
+    manager: State<'_, TerminalManager>,
+    session_id: String,
+    data: String,
+) -> Result<(), String> {
+    let sender = manager
+        .sessions
+        .lock()
+        .await
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "This terminal session is no longer connected".to_string())?;
+    sender
+        .send(TerminalAction::Data(data.into_bytes()))
+        .await
+        .map_err(|_| "This terminal session has closed".to_string())
+}
+
+#[tauri::command]
+pub async fn resize_terminal(
+    manager: State<'_, TerminalManager>,
+    session_id: String,
+    columns: u32,
+    rows: u32,
+) -> Result<(), String> {
+    let sender = manager
+        .sessions
+        .lock()
+        .await
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "This terminal session is no longer connected".to_string())?;
+    sender
+        .send(TerminalAction::Resize { columns, rows })
+        .await
+        .map_err(|_| "This terminal session has closed".to_string())
+}
+
+#[tauri::command]
+pub async fn close_terminal(
+    manager: State<'_, TerminalManager>,
+    session_id: String,
+) -> Result<(), String> {
+    if let Some(sender) = manager.sessions.lock().await.remove(&session_id) {
+        let _ = sender.send(TerminalAction::Close).await;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn connection_preflight(
     protocol: String,
     target: String,
@@ -107,5 +661,24 @@ pub async fn connection_preflight(
             })
         }
         _ => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn telnet_parser_strips_negotiation_and_refuses_options() {
+        let parsed =
+            TelnetParser::default().consume(&[b'L', b'o', 255, 251, 1, b'g', b'i', b'n', b':']);
+        assert_eq!(parsed.output, b"Login:");
+        assert_eq!(parsed.reply, vec![255, 254, 1]);
+    }
+
+    #[test]
+    fn telnet_parser_preserves_escaped_iac() {
+        let parsed = TelnetParser::default().consume(&[b'A', 255, 255, b'B']);
+        assert_eq!(parsed.output, vec![b'A', 255, b'B']);
     }
 }

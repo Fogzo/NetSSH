@@ -42,6 +42,7 @@ export interface Session {
   host: Host;
   lines: TerminalLine[];
   connected: boolean;
+  connectionState?: "connecting" | "connected" | "closed" | "error";
 }
 
 export type AiProvider = "openai" | "gemini" | "demo";
@@ -51,4 +52,13 @@ export interface AiMessage {
   role: "user" | "assistant";
   content: string;
   createdAt: number;
+}
+
+export interface CommandSnippet {
+  id: string;
+  name: string;
+  command: string;
+  vendor: string;
+  category: string;
+  description?: string;
 }

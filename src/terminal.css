@@ -1,0 +1,17 @@
+.terminal-line.warning pre,
+.terminal-line.warning .line-prefix {
+  color: #d59a6c;
+}
+
+.terminal-status.disconnected span:first-child {
+  color: #a47d68;
+}
+
+.terminal-status.disconnected i {
+  background: #b8785e;
+}
+
+.terminal-input input:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}

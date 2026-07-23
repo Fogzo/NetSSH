@@ -3,16 +3,17 @@ import {
   Activity, Bell, Bot, BrainCircuit, Calculator, Check, ChevronDown, ChevronRight, CircleDot,
   Clock3, Code2, Command, Copy, Database, Gauge, Globe2, Grid2X2, HardDrive,
   KeyRound, Layers3, Menu, MoreHorizontal, Network, PanelLeftClose, Pencil, Plus,
-  ExternalLink, Eye, EyeOff, LockKeyhole, Radio, Router, Search, Send, Server, Settings, ShieldCheck, Sparkles, Star,
-  TerminalSquare, Trash2, Wrench, X, Zap,
+  ExternalLink, Eye, EyeOff, LockKeyhole, Radio, RefreshCw, Router, Search, Send, Server, Settings, ShieldCheck, Sparkles, Star,
+  TerminalSquare, Trash2, Wifi, Wrench, X, Zap,
 } from "lucide-react";
 import { aiProviders, openProviderWebApp, providerIsConnected, removeProviderKey, saveProviderKey, sendAiMessage } from "./ai";
 import { hosts as initialHosts, recentCommands, snippets } from "./data";
 import { calculateSubnet, type SubnetResult } from "./network";
 import { runDiagnostic, type DiagnosticKind, type DiagnosticResult } from "./diagnostics";
-import { preflightConnection } from "./ssh";
+import { runWifiDiagnostic, signalHealth, type WifiDiagnostic } from "./wifi";
+import { closeTerminal, listenForTerminalEvents, preflightConnection, probeSshHostKey, startTerminalSession, writeTerminal } from "./ssh";
 import { deleteDevicePassword, hasDevicePassword, isNativeApp, saveDevicePassword } from "./credentials";
-import type { AiMessage, AiProvider, ConnectionHistory, ConnectionProtocol, Host, Session, TerminalLine, View } from "./types";
+import type { AiMessage, AiProvider, CommandSnippet, ConnectionHistory, ConnectionProtocol, Host, Session, TerminalLine, View } from "./types";
 
 const navItems: { id: View; label: string; icon: typeof TerminalSquare }[] = [
   { id: "workspace", label: "Workspace", icon: TerminalSquare },
@@ -29,6 +30,15 @@ type AppNotification = { id: string; message: string; createdAt: number; read: b
 const defaultPlatforms = ["Cisco IOS-XE", "Cisco NX-OS", "Arista EOS", "Juniper JunOS", "Palo Alto", "Fortinet FortiOS", "Linux", "Other"];
 const defaultSites = [...new Set(initialHosts.map((host) => host.site))].sort();
 const defaultPreferences: AppPreferences = { appearance: "dark", compactWorkspace: false, showConnectionWarnings: true, defaultProtocol: "ssh", sites: defaultSites, platforms: defaultPlatforms };
+
+function cleanTerminalOutput(value: string) {
+  return value
+    .replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "")
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "")
+    .replace(/[\u0000\u0007]/g, "");
+}
 
 function App() {
   const [view, setView] = useState<View>("workspace");
@@ -79,6 +89,26 @@ function App() {
   }, [preferences]);
 
   useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    listenForTerminalEvents((event) => {
+      const text = cleanTerminalOutput(event.data);
+      setSessions((current) => current.map((session) => {
+        if (session.id !== event.sessionId) return session;
+        if (event.kind === "connected") return { ...session, connected: true, connectionState: "connected", lines: [...session.lines, { kind: "info", text }] };
+        if (event.kind === "closed") return { ...session, connected: false, connectionState: "closed", lines: [...session.lines, { kind: "warning", text }] };
+        if (event.kind === "error") return { ...session, connected: false, connectionState: "error", lines: [...session.lines, { kind: "warning", text }] };
+        if (!text) return session;
+        return { ...session, lines: [...session.lines, { kind: event.kind === "info" ? "info" : "output", text }] };
+      }));
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    });
+    return () => { disposed = true; unlisten?.(); };
+  }, []);
+
+  useEffect(() => {
     const query = window.matchMedia?.("(prefers-color-scheme: dark)");
     if (!query) return;
     const update = (event: MediaQueryListEvent) => setSystemDark(event.matches);
@@ -94,6 +124,60 @@ function App() {
       setView("workspace");
       return existing.id;
     } else {
+      const id = `session-${host.id}-${Date.now()}`;
+      if (isNativeApp()) {
+        if (protocol !== "serial" && !host.username?.trim()) {
+          notify(`Add a username for ${host.name} before connecting`);
+          setEditingHost(host);
+          return null;
+        }
+        if (protocol !== "serial" && !await hasDevicePassword(host.id)) {
+          notify(`Add a password for ${host.name} before connecting`);
+          setEditingHost(host);
+          return null;
+        }
+        const port = protocol === "serial" ? undefined : host.port ?? (protocol === "telnet" ? 23 : 22);
+        let trustedFingerprint: string | undefined;
+        try {
+          if (protocol === "ssh") {
+            const fingerprint = await probeSshHostKey(host.address, port ?? 22);
+            const knownHosts = JSON.parse(localStorage.getItem("netssh.knownHosts") ?? "{}") as Record<string, string>;
+            const knownHostId = `${host.address}:${port ?? 22}`;
+            const existingFingerprint = knownHosts[knownHostId];
+            if (existingFingerprint !== fingerprint) {
+              const warning = existingFingerprint
+                ? `WARNING: The SSH host key for ${knownHostId} has changed.\n\nSaved: ${existingFingerprint}\nPresented: ${fingerprint}\n\nOnly continue if this change is expected.`
+                : `Trust this SSH host key for ${knownHostId}?\n\n${fingerprint}\n\nConfirm this fingerprint with your network administrator before continuing.`;
+              if (!window.confirm(warning)) return null;
+              knownHosts[knownHostId] = fingerprint;
+              localStorage.setItem("netssh.knownHosts", JSON.stringify(knownHosts));
+            }
+            trustedFingerprint = fingerprint;
+          }
+          setSessions((current) => [...current, {
+            id,
+            host,
+            connected: false,
+            connectionState: "connecting",
+            lines: [
+              { kind: "info", text: protocol === "serial" ? `Opening ${host.address} at ${host.baudRate ?? 9600} baud…` : `Connecting to ${host.username}@${host.address}:${port} over ${protocol.toUpperCase()}…` },
+              ...(protocol === "telnet" ? [{ kind: "warning" as const, text: "Telnet credentials and session traffic are not encrypted. Use only on a trusted management network." }] : []),
+            ],
+          }]);
+          setActiveSession(id);
+          setView("workspace");
+          await startTerminalSession({ sessionId: id, deviceId: host.id, protocol, target: host.address, port, baudRate: host.baudRate, username: host.username, trustedFingerprint });
+          setHistory((current) => [{ id: crypto.randomUUID(), deviceId: host.id, deviceName: host.name, protocol, address: host.address, startedAt: Date.now(), success: true, detail: `${protocol.toUpperCase()} session connected` }, ...current].slice(0, 250));
+          return id;
+        } catch (caught) {
+          const detail = String(caught);
+          setSessions((current) => current.filter((session) => session.id !== id));
+          setActiveSession((current) => current === id ? null : current);
+          setHistory((current) => [{ id: crypto.randomUUID(), deviceId: host.id, deviceName: host.name, protocol, address: host.address, startedAt: Date.now(), success: false, detail }, ...current].slice(0, 250));
+          notify(detail);
+          return null;
+        }
+      }
       let preflight;
       try {
         preflight = await preflightConnection(protocol, host.address, protocol === "serial" ? undefined : host.port ?? (protocol === "telnet" ? 23 : 22), host.baudRate);
@@ -104,7 +188,6 @@ function App() {
         return null;
       }
       setHistory((current) => [{ id: crypto.randomUUID(), deviceId: host.id, deviceName: host.name, protocol, address: host.address, startedAt: Date.now(), success: true, detail: preflight.banner ?? `${protocol.toUpperCase()} target reachable`, elapsedMs: preflight.elapsedMs }, ...current].slice(0, 250));
-      const id = `session-${host.id}-${Date.now()}`;
       setSessions((current) => [...current, {
         id,
         host,
@@ -112,7 +195,7 @@ function App() {
         lines: [
           { kind: "info", text: `${protocol.toUpperCase()} preflight completed for ${host.address}${protocol === "serial" ? ` at ${host.baudRate ?? 9600} baud` : `:${host.port ?? (protocol === "telnet" ? 23 : 22)}`} in ${preflight.elapsedMs} ms` },
           { kind: "info", text: preflight.banner ?? `${protocol.toUpperCase()} service reachable` },
-          ...(preferences.showConnectionWarnings ? [{ kind: "warning" as const, text: `Interactive ${protocol.toUpperCase()} transport and authentication are not enabled in this Phase 2 preview.` }] : []),
+          ...(preferences.showConnectionWarnings ? [{ kind: "warning" as const, text: protocol === "serial" ? "Interactive serial transport is not enabled yet." : "Browser preview cannot open native terminal sessions. Run the desktop app to connect." }] : []),
         ],
       }]);
       setActiveSession(id);
@@ -122,6 +205,7 @@ function App() {
   };
 
   const closeSession = (id: string) => {
+    void closeTerminal(id);
     const remaining = sessions.filter((session) => session.id !== id);
     setSessions(remaining);
     if (activeSession === id) setActiveSession(remaining.at(-1)?.id ?? null);
@@ -167,7 +251,13 @@ function App() {
           )}
           {view === "inventory" && <Inventory hosts={deviceHosts} onConnect={connect} onAdd={() => setAddDeviceOpen(true)} onEdit={setEditingHost} onFavorite={(id) => setDeviceHosts((current) => current.map((host) => host.id === id ? { ...host, favorite: !host.favorite } : host))} onDelete={(id) => { setDeviceHosts((current) => current.filter((host) => host.id !== id)); deleteDevicePassword(id).catch(() => undefined); notify("Device removed"); }} />}
           {view === "toolbox" && <Toolbox notify={notify} />}
-          {view === "snippets" && <Snippets notify={notify} />}
+          {view === "snippets" && <Snippets notify={notify} onRun={(snippet) => {
+            if (!activeSession) { notify("Open a device session before running a snippet"); setView("workspace"); return; }
+            const target = sessions.find((session) => session.id === activeSession);
+            if (!target?.connected) { notify("The selected session is not connected"); return; }
+            writeTerminal(activeSession, `${snippet.command}\r\n`).then(() => notify(`Sent ${snippet.name}`)).catch((caught) => notify(String(caught)));
+            setView("workspace");
+          }} />}
           {view === "assistant" && <AiAssistant notify={notify} />}
           {view === "favorites" && <Favorites hosts={deviceHosts} onConnect={connect} onFavorite={(id) => setDeviceHosts((current) => current.map((host) => host.id === id ? { ...host, favorite: !host.favorite } : host))} onShowInventory={() => setView("inventory")} />}
           {view === "history" && <History entries={history} hosts={deviceHosts} onConnect={connect} onClear={() => { setHistory([]); notify("Connection history cleared"); }} />}
@@ -387,19 +477,14 @@ function Terminal({ session, onCommand, autoFocus = true }: { session: Session; 
     event.preventDefault();
     const clean = command.trim();
     if (!clean) return;
-    const responses: Record<string, string> = {
-      "show ip interface brief": "Interface              IP-Address      OK? Method Status                Protocol\nGigabitEthernet0/0     10.24.0.1      YES NVRAM  up                    up\nGigabitEthernet0/1     172.20.10.2    YES NVRAM  up                    up\nLoopback0              10.255.0.1     YES NVRAM  up                    up",
-      "show bgp summary": "BGP router identifier 10.255.0.1, local AS number 65001\nNeighbor        V    AS MsgRcvd MsgSent Up/Down  State/PfxRcd\n172.20.10.1     4 65000  184221  183992 12w3d           842",
-      "show version": `${session.host.platform}\nNetSSH demonstration session · uptime 84 days, 11 hours`,
-      "clear": "__CLEAR__",
-    };
-    const output = responses[clean.toLowerCase()] ?? `% Command accepted: ${clean}\nDemo mode: native SSH transport is connected through the Tauri backend in production.`;
-    if (output === "__CLEAR__") onCommand([{ kind: "info", text: "Terminal cleared" }]);
-    else onCommand([{ kind: "command", text: clean }, { kind: "output", text: output }]);
+    if (clean.toLowerCase() === "clear") onCommand([{ kind: "info", text: "— terminal cleared —" }]);
+    else if (!session.connected) onCommand([{ kind: "warning", text: "This session is not connected." }]);
+    else void writeTerminal(session.id, `${clean}${session.host.protocol === "serial" ? "\r" : "\r\n"}`).catch((caught) => onCommand([{ kind: "warning", text: String(caught) }]));
     setCommand("");
   };
 
-  return <div className="terminal"><div className="terminal-output">{session.lines.map((line, index) => <div className={`terminal-line ${line.kind}`} key={`${index}-${line.text}`}><span className="line-prefix">{line.kind === "command" ? `${session.host.name}#` : line.kind === "info" ? "●" : ""}</span><pre>{line.text}</pre></div>)}<div ref={bottomRef} /></div><form className="terminal-input" onSubmit={submit}><span>{session.host.name}#</span><input autoFocus={autoFocus} value={command} onChange={(event) => setCommand(event.target.value)} spellCheck={false} placeholder="Type a command…" /><kbd>Enter</kbd></form><div className="terminal-status"><span><i /> {(session.host.protocol ?? "ssh").toUpperCase()} · Preflight</span><span>UTF-8</span><span>{session.host.platform}</span></div></div>;
+  const stateLabel = session.connectionState === "connecting" ? "Connecting" : session.connected ? "Connected" : session.connectionState === "error" ? "Error" : "Closed";
+  return <div className="terminal"><div className="terminal-output">{session.lines.map((line, index) => <div className={`terminal-line ${line.kind}`} key={`${index}-${line.text}`}><span className="line-prefix">{line.kind === "command" ? `${session.host.name}#` : line.kind === "info" ? "●" : ""}</span><pre>{line.text}</pre></div>)}<div ref={bottomRef} /></div><form className="terminal-input" onSubmit={submit}><span>{session.host.name}#</span><input autoFocus={autoFocus} disabled={!session.connected} value={command} onChange={(event) => setCommand(event.target.value)} spellCheck={false} placeholder={session.connected ? "Type a command…" : "Session is not connected"} /><kbd>Enter</kbd></form><div className={`terminal-status ${session.connected ? "connected" : "disconnected"}`}><span><i /> {(session.host.protocol ?? "ssh").toUpperCase()} · {stateLabel}</span><span>UTF-8</span><span>{session.host.platform}</span></div></div>;
 }
 
 function Inventory({ hosts, onConnect, onAdd, onEdit, onFavorite, onDelete }: { hosts: Host[]; onConnect: (host: Host) => void; onAdd: () => void; onEdit: (host: Host) => void; onFavorite: (id: string) => void; onDelete: (id: string) => void }) {
@@ -447,8 +532,10 @@ function PasswordModal({ host, onClose, onSave }: { host: Host; onClose: () => v
   return <div className="modal-backdrop" onMouseDown={onClose}><section className="confirm-modal password-modal" onMouseDown={(event) => event.stopPropagation()}><span><KeyRound size={19} /></span><h3>Save password for {host.name}</h3><p>The password is written directly to your operating system credential vault.</p><div className="secret-input"><LockKeyhole size={15} /><input autoFocus type={visible ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" placeholder="Device password" /><button onClick={() => setVisible(!visible)}>{visible ? <EyeOff size={15} /> : <Eye size={15} />}</button></div><div className="password-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={!password} onClick={() => onSave(password)}>Save securely</button></div></section></div>;
 }
 
+type ToolboxTool = "subnet" | "ping" | "dns" | "port" | "wifi";
+
 function Toolbox({ notify }: { notify: (message: string) => void }) {
-  const [activeTool, setActiveTool] = useState<"subnet" | "ping" | "dns" | "port">("subnet");
+  const [activeTool, setActiveTool] = useState<ToolboxTool>("subnet");
   const [cidr, setCidr] = useState("10.24.16.34/20");
   const [result, setResult] = useState<SubnetResult>(() => calculateSubnet(cidr));
   const [error, setError] = useState("");
@@ -462,8 +549,30 @@ function Toolbox({ notify }: { notify: (message: string) => void }) {
     { id: "ping" as const, icon: Radio, label: "Ping & trace" },
     { id: "dns" as const, icon: Globe2, label: "DNS lookup" },
     { id: "port" as const, icon: Database, label: "Port check" },
+    { id: "wifi" as const, icon: Wifi, label: "Wi-Fi diagnostics" },
   ];
-  return <div className="page"><div className="page-intro"><div><h2>Network toolbox</h2><p>Fast, reliable utilities built into your workflow.</p></div></div><div className="tool-tabs">{tools.map((tool) => <button key={tool.id} className={activeTool === tool.id ? "active" : ""} onClick={() => setActiveTool(tool.id)}><tool.icon size={16} /> {tool.label}</button>)}</div>{activeTool === "subnet" ? <div className="tool-grid"><section className="panel calculator-panel"><div className="panel-title"><div><h3>IPv4 subnet calculator</h3><p>Enter any address using CIDR notation</p></div><span className="tool-icon"><Calculator size={20} /></span></div><form onSubmit={calculate} className="calculator-form"><label>IP address / CIDR</label><div><input value={cidr} onChange={(event) => setCidr(event.target.value)} placeholder="192.168.1.10/24" /><button className="primary-button">Calculate</button></div>{error && <span className="form-error">{error}</span>}</form><div className="result-grid"><Result label="Network" value={result.network} copy={copy} /><Result label="Broadcast" value={result.broadcast} copy={copy} /><Result label="Subnet mask" value={result.mask} copy={copy} /><Result label="Wildcard mask" value={result.wildcard} copy={copy} /><Result label="First usable" value={result.firstHost} copy={copy} /><Result label="Last usable" value={result.lastHost} copy={copy} /></div><div className="capacity-row"><div><span>Address space</span><strong>{result.cidr}</strong></div><div><span>Usable hosts</span><strong>{result.usable.toLocaleString()}</strong></div><div><span>Total addresses</span><strong>{result.total.toLocaleString()}</strong></div><div><span>Scope</span><strong>{result.isPrivate ? "Private" : "Public"}</strong></div></div></section><aside className="tool-aside"><section className="panel"><div className="panel-title"><div><h3>Binary view</h3><p>32-bit representation</p></div></div><div className="binary-value">{result.binary.split(".").map((part, index) => <span key={index}>{part}{index < 3 && <i>.</i>}</span>)}</div></section><section className="panel quick-tools"><div className="panel-title"><div><h3>Quick tools</h3><p>Common network checks</p></div></div>{tools.slice(1).map((tool) => <button key={tool.id} onClick={() => setActiveTool(tool.id)}><span><tool.icon size={17} /></span><div><strong>{tool.label}</strong><small>{tool.id === "ping" ? "Reachability and hop path" : tool.id === "dns" ? "System resolver lookup" : "Timed TCP handshake"}</small></div><ChevronRight size={15} /></button>)}</section></aside></div> : <DiagnosticPanel tool={activeTool} notify={notify} />}</div>;
+  const toolDescription = (tool: ToolboxTool) => tool === "ping" ? "Reachability and hop path" : tool === "dns" ? "System resolver lookup" : tool === "port" ? "Timed TCP handshake" : tool === "wifi" ? "RSSI, channel and radio health" : "Address planning";
+  return <div className="page"><div className="page-intro"><div><h2>Network toolbox</h2><p>Fast, reliable utilities built into your workflow.</p></div></div><div className="tool-tabs">{tools.map((tool) => <button key={tool.id} className={activeTool === tool.id ? "active" : ""} onClick={() => setActiveTool(tool.id)}><tool.icon size={16} /> {tool.label}</button>)}</div>{activeTool === "subnet" ? <div className="tool-grid"><section className="panel calculator-panel"><div className="panel-title"><div><h3>IPv4 subnet calculator</h3><p>Enter any address using CIDR notation</p></div><span className="tool-icon"><Calculator size={20} /></span></div><form onSubmit={calculate} className="calculator-form"><label>IP address / CIDR</label><div><input value={cidr} onChange={(event) => setCidr(event.target.value)} placeholder="192.168.1.10/24" /><button className="primary-button">Calculate</button></div>{error && <span className="form-error">{error}</span>}</form><div className="result-grid"><Result label="Network" value={result.network} copy={copy} /><Result label="Broadcast" value={result.broadcast} copy={copy} /><Result label="Subnet mask" value={result.mask} copy={copy} /><Result label="Wildcard mask" value={result.wildcard} copy={copy} /><Result label="First usable" value={result.firstHost} copy={copy} /><Result label="Last usable" value={result.lastHost} copy={copy} /></div><div className="capacity-row"><div><span>Address space</span><strong>{result.cidr}</strong></div><div><span>Usable hosts</span><strong>{result.usable.toLocaleString()}</strong></div><div><span>Total addresses</span><strong>{result.total.toLocaleString()}</strong></div><div><span>Scope</span><strong>{result.isPrivate ? "Private" : "Public"}</strong></div></div></section><aside className="tool-aside"><section className="panel"><div className="panel-title"><div><h3>Binary view</h3><p>32-bit representation</p></div></div><div className="binary-value">{result.binary.split(".").map((part, index) => <span key={index}>{part}{index < 3 && <i>.</i>}</span>)}</div></section><section className="panel quick-tools"><div className="panel-title"><div><h3>Quick tools</h3><p>Common network checks</p></div></div>{tools.slice(1).map((tool) => <button key={tool.id} onClick={() => setActiveTool(tool.id)}><span><tool.icon size={17} /></span><div><strong>{tool.label}</strong><small>{toolDescription(tool.id)}</small></div><ChevronRight size={15} /></button>)}</section></aside></div> : activeTool === "wifi" ? <WifiPanel notify={notify} /> : <DiagnosticPanel tool={activeTool} notify={notify} />}</div>;
+}
+
+function WifiPanel({ notify }: { notify: (message: string) => void }) {
+  const [result, setResult] = useState<WifiDiagnostic | null>(null);
+  const [running, setRunning] = useState(true);
+  const [error, setError] = useState("");
+  const refresh = async () => {
+    setRunning(true); setError("");
+    try { setResult(await runWifiDiagnostic()); }
+    catch (caught) { setResult(null); setError(String(caught)); }
+    finally { setRunning(false); }
+  };
+  useEffect(() => { void refresh(); }, []);
+  const health = signalHealth(result?.rssiDbm, result?.signalPercent);
+  const signalValue = result?.rssiDbm != null ? `${result.rssiDbm} dBm` : result?.signalPercent != null ? `${result.signalPercent}%` : "Unavailable";
+  return <div className="wifi-layout"><section className="panel wifi-panel"><div className="panel-title"><div><h3>Wireless connection health</h3><p>Read-only diagnostics from the local Wi-Fi adapter</p></div><button className="wifi-refresh" onClick={() => void refresh()} disabled={running}><RefreshCw size={15} className={running ? "spin" : ""} />{running ? "Scanning…" : "Refresh"}</button></div>{error && <div className="diagnostic-error">{error}</div>}{!result && !error ? <div className="wifi-loading"><Wifi size={28} /><strong>Inspecting wireless adapter…</strong></div> : result && <><div className="wifi-summary"><div className={`wifi-signal ${health.tone}`}><div><Wifi size={24} /><span>{result.connected ? "Connected" : "Not connected"}</span></div><strong>{signalValue}</strong><small>{result.connected ? health.label : "No active Wi-Fi link"}</small><div className="signal-track"><i style={{ width: `${result.connected ? health.score : 0}%` }} /></div></div><div className="wifi-identity"><span>Network</span><strong>{result.ssid ?? "SSID unavailable"}</strong><small>{result.bssid ?? result.interfaceName ?? result.platform}</small></div></div><div className="wifi-metrics"><WifiMetric label="Signal" value={signalValue} hint="RSSI closer to 0 is stronger" /><WifiMetric label="Noise floor" value={result.noiseDbm != null ? `${result.noiseDbm} dBm` : "Unavailable"} hint={result.snrDb != null ? `SNR ${result.snrDb} dB` : "Not exposed by this adapter"} /><WifiMetric label="Channel" value={result.channel ?? "Unknown"} hint={result.band ?? "Band unavailable"} /><WifiMetric label="Radio" value={result.radioType ?? "Unknown"} hint={[result.txRateMbps && `Tx ${result.txRateMbps} Mbps`, result.rxRateMbps && `Rx ${result.rxRateMbps} Mbps`].filter(Boolean).join(" · ") || "Rates unavailable"} /><WifiMetric label="Security" value={result.security ?? "Unknown"} hint="Verify enterprise or personal policy" /><WifiMetric label="Interface" value={result.interfaceName ?? "Unknown"} hint={`${result.platform} · ${result.elapsedMs} ms`} /></div>{result.nearbyNetworks.length > 0 && <div className="nearby-networks"><div className="wifi-section-title"><strong>Nearby access points</strong><span>{result.nearbyNetworks.length} detected</span></div><div className="nearby-head"><span>SSID / BSSID</span><span>Signal</span><span>Channel</span><span>Radio</span></div>{result.nearbyNetworks.slice(0, 12).map((network, index) => <div className="nearby-row" key={`${network.bssid ?? network.ssid}-${index}`}><span><strong>{network.ssid || "Hidden network"}</strong><small>{network.bssid ?? network.security ?? ""}</small></span><span>{network.estimatedRssiDbm != null ? `${network.estimatedRssiDbm} dBm` : network.signalPercent != null ? `${network.signalPercent}%` : "—"}</span><span>{network.channel ?? "—"}</span><span>{network.radioType ?? "—"}</span></div>)}</div>}<div className="wifi-raw"><div className="wifi-section-title"><strong>Native diagnostic output</strong><button onClick={() => { navigator.clipboard?.writeText(result.rawOutput); notify("Wi-Fi output copied"); }}><Copy size={13} /> Copy</button></div><pre>{result.rawOutput}</pre></div></>}</section><aside className="panel wifi-guidance"><div className="panel-title"><div><h3>Engineer guidance</h3><p>How to interpret the link</p></div><span className="tool-icon"><ShieldCheck size={19} /></span></div><div className="wifi-thresholds"><span><i className="excellent" />-50 dBm<strong>Excellent</strong></span><span><i className="good" />-60 to -67<strong>Good</strong></span><span><i className="fair" />-68 to -70<strong>Fair</strong></span><span><i className="weak" />-71 to -80<strong>Weak</strong></span><span><i className="poor" />Below -80<strong>Poor</strong></span></div><div className="wifi-advice"><strong>Findings</strong>{result?.recommendations.map((recommendation) => <p key={recommendation}>{recommendation}</p>) ?? <p>Run the diagnostic to see recommendations.</p>}</div><div className="wifi-privacy"><LockKeyhole size={15} /><p>SSID and BSSID stay on this device. On macOS, enable Location Services for network diagnostics if these fields remain hidden.</p></div></aside></div>;
+}
+
+function WifiMetric({ label, value, hint }: { label: string; value: string; hint: string }) {
+  return <div><span>{label}</span><strong>{value}</strong><small>{hint}</small></div>;
 }
 
 function DiagnosticPanel({ tool, notify }: { tool: "ping" | "dns" | "port"; notify: (message: string) => void }) {
@@ -540,8 +649,41 @@ function ConfirmModal({ title, message, confirmLabel, onCancel, onConfirm }: { t
   return <div className="modal-backdrop confirm-backdrop" onMouseDown={onCancel}><section className="confirm-modal" onMouseDown={(event) => event.stopPropagation()}><span><Trash2 size={19} /></span><h3>{title}</h3><p>{message}</p><div><button className="secondary-button" onClick={onCancel}>Cancel</button><button className="confirm-danger" onClick={onConfirm}>{confirmLabel}</button></div></section></div>;
 }
 
-function Snippets({ notify }: { notify: (message: string) => void }) {
-  return <div className="page"><div className="page-intro"><div><h2>Command snippets</h2><p>Reusable, vendor-aware commands for faster troubleshooting.</p></div><button className="primary-button"><Plus size={17} /> New snippet</button></div><div className="snippet-grid">{snippets.map((snippet) => <section className="panel snippet-card" key={snippet.name}><div><span className="snippet-icon"><Code2 size={18} /></span><span className="vendor-tag">{snippet.vendor}</span></div><h3>{snippet.name}</h3><code>{snippet.command}</code><div><button onClick={() => { navigator.clipboard?.writeText(snippet.command); notify("Snippet copied"); }}><Copy size={15} /> Copy</button><button><Zap size={15} /> Run</button></div></section>)}</div></div>;
+function Snippets({ notify, onRun }: { notify: (message: string) => void; onRun: (snippet: CommandSnippet) => void }) {
+  const [items, setItems] = useState<CommandSnippet[]>(() => {
+    try { const saved = localStorage.getItem("netssh.snippets"); return saved ? JSON.parse(saved) as CommandSnippet[] : snippets; }
+    catch { return snippets; }
+  });
+  const [query, setQuery] = useState("");
+  const [vendor, setVendor] = useState("all");
+  const [editing, setEditing] = useState<CommandSnippet | null | undefined>(undefined);
+  const [pendingDelete, setPendingDelete] = useState<CommandSnippet | null>(null);
+  useEffect(() => { localStorage.setItem("netssh.snippets", JSON.stringify(items)); }, [items]);
+  const vendors = [...new Set(items.map((snippet) => snippet.vendor))].sort();
+  const filtered = items.filter((snippet) => {
+    const matchesQuery = `${snippet.name} ${snippet.command} ${snippet.vendor} ${snippet.category} ${snippet.description ?? ""}`.toLowerCase().includes(query.toLowerCase());
+    return matchesQuery && (vendor === "all" || snippet.vendor === vendor);
+  });
+  const save = (snippet: CommandSnippet) => {
+    setItems((current) => current.some((item) => item.id === snippet.id) ? current.map((item) => item.id === snippet.id ? snippet : item) : [snippet, ...current]);
+    setEditing(undefined); notify(`${snippet.name} saved`);
+  };
+  return <div className="page"><div className="page-intro"><div><h2>Command snippets</h2><p>Reusable, vendor-aware commands stored locally on this device.</p></div><button className="primary-button" onClick={() => setEditing(null)}><Plus size={17} /> New snippet</button></div><div className="snippet-toolbar"><div className="input-wrap"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search commands, vendors, or categories…" /></div><div className="select-wrap"><select value={vendor} onChange={(event) => setVendor(event.target.value)}><option value="all">All vendors</option>{vendors.map((value) => <option value={value} key={value}>{value}</option>)}</select><ChevronDown size={14} /></div></div><div className="snippet-summary"><span>{filtered.length} of {items.length} snippets</span><button onClick={() => { setItems(snippets); notify("Default Cisco snippets restored"); }}>Restore Cisco defaults</button></div>{filtered.length ? <div className="snippet-grid">{filtered.map((snippet) => <section className="panel snippet-card" key={snippet.id}><div><span className="snippet-icon"><Code2 size={18} /></span><div className="snippet-tags"><span className="vendor-tag">{snippet.vendor}</span><span className="category-tag">{snippet.category}</span></div></div><h3>{snippet.name}</h3><p>{snippet.description ?? "Reusable command snippet"}</p><code>{snippet.command}</code><div><button aria-label={`Edit ${snippet.name}`} onClick={() => setEditing(snippet)}><Pencil size={14} /> Edit</button><button aria-label={`Delete ${snippet.name}`} onClick={() => setPendingDelete(snippet)}><Trash2 size={14} /></button><span /><button onClick={() => { navigator.clipboard?.writeText(snippet.command); notify("Snippet copied"); }}><Copy size={14} /> Copy</button><button className="run-snippet" onClick={() => onRun(snippet)}><Zap size={14} /> Run</button></div></section>)}</div> : <div className="panel snippet-empty"><Search size={22} /><strong>No snippets found</strong><span>Try another search or create a new snippet.</span></div>}{editing !== undefined && <SnippetModal snippet={editing ?? undefined} onClose={() => setEditing(undefined)} onSave={save} />}{pendingDelete && <ConfirmModal title="Delete snippet?" message={`Remove “${pendingDelete.name}” from your local snippet library?`} confirmLabel="Delete snippet" onCancel={() => setPendingDelete(null)} onConfirm={() => { setItems((current) => current.filter((item) => item.id !== pendingDelete.id)); setPendingDelete(null); notify("Snippet deleted"); }} />}</div>;
+}
+
+function SnippetModal({ snippet, onClose, onSave }: { snippet?: CommandSnippet; onClose: () => void; onSave: (snippet: CommandSnippet) => void }) {
+  const [name, setName] = useState(snippet?.name ?? "");
+  const [vendor, setVendor] = useState(snippet?.vendor ?? "Cisco IOS/IOS-XE");
+  const [category, setCategory] = useState(snippet?.category ?? "Troubleshooting");
+  const [description, setDescription] = useState(snippet?.description ?? "");
+  const [command, setCommand] = useState(snippet?.command ?? "");
+  const [error, setError] = useState("");
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (!name.trim() || !command.trim() || !vendor.trim() || !category.trim()) { setError("Name, vendor, category, and command are required"); return; }
+    onSave({ id: snippet?.id ?? crypto.randomUUID(), name: name.trim(), vendor: vendor.trim(), category: category.trim(), description: description.trim() || undefined, command: command.trim() });
+  };
+  return <div className="modal-backdrop" onMouseDown={onClose}><section className="snippet-modal" onMouseDown={(event) => event.stopPropagation()}><div className="provider-modal-head"><div><span><Code2 size={18} /></span><div><h3>{snippet ? "Edit command snippet" : "New command snippet"}</h3><p>Saved locally and available from the toolbox.</p></div></div><button onClick={onClose}><X size={17} /></button></div><form onSubmit={submit} className="snippet-form"><div className="form-grid"><label><span>Name *</span><input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="Check interface health" /></label><label><span>Vendor *</span><input value={vendor} onChange={(event) => setVendor(event.target.value)} placeholder="Cisco IOS-XE" /></label><label><span>Category *</span><input value={category} onChange={(event) => setCategory(event.target.value)} placeholder="Interfaces" /></label><label><span>Description</span><input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="What this command checks" /></label><label className="wide-field"><span>Command *</span><textarea className="snippet-command-input" value={command} onChange={(event) => setCommand(event.target.value)} placeholder="show ip interface brief" rows={5} spellCheck={false} /></label></div>{error && <div className="modal-error">{error}</div>}<div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button"><Check size={15} /> Save snippet</button></div></form></section></div>;
 }
 
 const assistantWelcome: AiMessage = {
@@ -629,7 +771,7 @@ function AiAssistant({ notify }: { notify: (message: string) => void }) {
     <aside className="assistant-context">
       <section><div className="context-heading"><span><Layers3 size={16} /></span><div><strong>Session context</strong><small>Optional context sent with chat</small></div></div><button className="context-empty"><TerminalSquare size={18} /><span><strong>No session attached</strong><small>Attach terminal output for analysis</small></span><Plus size={14} /></button></section>
       <section><div className="context-heading"><span><ShieldCheck size={16} /></span><div><strong>Privacy controls</strong><small>Review before sending</small></div></div><label className="privacy-row"><span>Redact IP addresses</span><input type="checkbox" /></label><label className="privacy-row"><span>Remove possible secrets</span><input type="checkbox" defaultChecked /></label></section>
-      <section className="provider-card"><div className="context-heading"><span><Bot size={16} /></span><div><strong>{aiProviders[provider].name}</strong><small>{aiProviders[provider].model}</small></div></div><button onClick={() => setSettingsOpen(true)}><Settings size={14} /> API provider settings</button><div className="web-chat-divider"><span>or use your existing login</span></div><button onClick={() => openProviderWebApp("openai")}><ExternalLink size={14} /> Open ChatGPT web</button><button onClick={() => openProviderWebApp("gemini")}><ExternalLink size={14} /> Open Gemini web</button></section>
+      <section className="provider-card"><div className="context-heading"><span><Bot size={16} /></span><div><strong>{aiProviders[provider].name}</strong><small>{aiProviders[provider].model}</small></div></div><button onClick={() => setSettingsOpen(true)}><Settings size={14} /> API provider settings</button><div className="web-chat-divider"><span>or use your existing login</span></div><button onClick={() => openProviderWebApp("openai").catch((caught) => notify(String(caught)))}><ExternalLink size={14} /> ChatGPT in NetSSH</button><button onClick={() => openProviderWebApp("gemini").catch((caught) => notify(String(caught)))}><ExternalLink size={14} /> Gemini in NetSSH</button></section>
     </aside>
     {settingsOpen && <ProviderSettings connected={connected} setConnected={setConnected} onClose={() => setSettingsOpen(false)} notify={notify} />}
   </div>;
@@ -661,7 +803,7 @@ function ProviderSettings({ connected, setConnected, onClose, notify }: { connec
     setConnected({ ...connected, [provider]: false });
     notify(`${aiProviders[provider].name} disconnected`);
   };
-  return <div className="modal-backdrop" onMouseDown={onClose}><section className="provider-modal" onMouseDown={(event) => event.stopPropagation()}><div className="provider-modal-head"><div><span><LockKeyhole size={18} /></span><div><h3>Connect an AI provider</h3><p>Use the provider website or connect an API key.</p></div></div><button onClick={onClose}><X size={17} /></button></div><div className="provider-options"><button className={provider === "openai" ? "active" : ""} onClick={() => setProvider("openai")}><span className="openai-mark">O</span><div><strong>OpenAI</strong><small>GPT-5.6 Terra</small></div>{connected.openai && <Check size={15} />}</button><button className={provider === "gemini" ? "active" : ""} onClick={() => setProvider("gemini")}><span className="gemini-mark">G</span><div><strong>Google Gemini</strong><small>Gemini 3.6 Flash</small></div>{connected.gemini && <Check size={15} />}</button></div><form onSubmit={save} className="provider-form"><button type="button" className="web-mode-button" onClick={() => openProviderWebApp(provider)}><ExternalLink size={16} /><span><strong>Open {provider === "openai" ? "ChatGPT" : "Gemini"} web</strong><small>Sign in with your existing account or subscription</small></span><ChevronRight size={15} /></button><div className="web-chat-divider"><span>or connect for integrated context</span></div><label>{aiProviders[provider].name} API key</label><div className="secret-input"><KeyRound size={15} /><input type={visible ? "text" : "password"} value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={provider === "openai" ? "sk-…" : "AIza…"} /><button type="button" onClick={() => setVisible(!visible)}>{visible ? <EyeOff size={15} /> : <Eye size={15} />}</button></div>{error && <span className="form-error">{error}</span>}<p>API access is separate from a consumer ChatGPT or Gemini subscription. It enables NetSSH to provide redacted session context and may be billed by your provider.</p><a href={provider === "openai" ? "https://platform.openai.com/api-keys" : "https://aistudio.google.com/app/apikey"} target="_blank" rel="noreferrer">Get an API key <ExternalLink size={12} /></a><div className="provider-actions">{connected[provider] && <button type="button" className="danger-button" onClick={remove}><Trash2 size={14} /> Disconnect</button>}<span /><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={!apiKey.trim()}>Save securely</button></div></form></section></div>;
+  return <div className="modal-backdrop" onMouseDown={onClose}><section className="provider-modal" onMouseDown={(event) => event.stopPropagation()}><div className="provider-modal-head"><div><span><LockKeyhole size={18} /></span><div><h3>Connect an AI provider</h3><p>Use an in-app signed-in web session or connect an API key.</p></div></div><button onClick={onClose}><X size={17} /></button></div><div className="provider-options"><button className={provider === "openai" ? "active" : ""} onClick={() => setProvider("openai")}><span className="openai-mark">O</span><div><strong>OpenAI</strong><small>GPT-5.6 Terra</small></div>{connected.openai && <Check size={15} />}</button><button className={provider === "gemini" ? "active" : ""} onClick={() => setProvider("gemini")}><span className="gemini-mark">G</span><div><strong>Google Gemini</strong><small>Gemini 3.6 Flash</small></div>{connected.gemini && <Check size={15} />}</button></div><form onSubmit={save} className="provider-form"><button type="button" className="web-mode-button" onClick={() => openProviderWebApp(provider).catch((caught) => setError(String(caught)))}><ExternalLink size={16} /><span><strong>Open {provider === "openai" ? "ChatGPT" : "Gemini"} in NetSSH</strong><small>Dedicated app window using your existing account or subscription</small></span><ChevronRight size={15} /></button><p className="embedded-web-note">Provider web chat remains separate from terminal context. Some identity providers may require login in your default browser for security.</p><div className="web-chat-divider"><span>or connect for integrated context</span></div><label>{aiProviders[provider].name} API key</label><div className="secret-input"><KeyRound size={15} /><input type={visible ? "text" : "password"} value={apiKey} onChange={(event) => setApiKey(event.target.value)} placeholder={provider === "openai" ? "sk-…" : "AIza…"} /><button type="button" onClick={() => setVisible(!visible)}>{visible ? <EyeOff size={15} /> : <Eye size={15} />}</button></div>{error && <span className="form-error">{error}</span>}<p>API access is separate from a consumer ChatGPT or Gemini subscription. It enables NetSSH to provide redacted session context and may be billed by your provider.</p><a href={provider === "openai" ? "https://platform.openai.com/api-keys" : "https://aistudio.google.com/app/apikey"} target="_blank" rel="noreferrer">Get an API key <ExternalLink size={12} /></a><div className="provider-actions">{connected[provider] && <button type="button" className="danger-button" onClick={remove}><Trash2 size={14} /> Disconnect</button>}<span /><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={!apiKey.trim()}>Save securely</button></div></form></section></div>;
 }
 
 function CommandPalette({ hosts, onClose, onConnect, onNavigate }: { hosts: Host[]; onClose: () => void; onConnect: (host: Host) => void; onNavigate: (view: View) => void }) {

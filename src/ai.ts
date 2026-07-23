@@ -1,5 +1,4 @@
 import { invoke } from "@tauri-apps/api/core";
-import { openUrl } from "@tauri-apps/plugin-opener";
 import type { AiMessage, AiProvider } from "./types";
 
 export const aiProviders = {
@@ -39,7 +38,7 @@ export async function sendAiMessage(provider: AiProvider, messages: AiMessage[])
 
 export async function openProviderWebApp(provider: "openai" | "gemini"): Promise<void> {
   const url = provider === "openai" ? "https://chatgpt.com/" : "https://gemini.google.com/app";
-  if (isTauri()) await openUrl(url);
+  if (isTauri()) await invoke("open_ai_webview", { provider });
   else window.open(url, "_blank", "noopener,noreferrer");
 }
 

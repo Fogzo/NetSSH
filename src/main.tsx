@@ -5,6 +5,8 @@ import "./styles.css";
 import "./features.css";
 import "./interaction.css";
 import "./themes.css";
+import "./readability.css";
+import "./terminal.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
