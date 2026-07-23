@@ -217,9 +217,6 @@ pub async fn start_terminal_session(
             if username.is_empty() {
                 return Err("SSH requires a username before authentication can begin".into());
             }
-            let password = password.as_deref().ok_or_else(|| {
-                "SSH requires a password before the remote shell can open".to_string()
-            })?;
             let port = validate_port(port.unwrap_or(22))?;
             let expected = trusted_fingerprint
                 .filter(|fingerprint| !fingerprint.trim().is_empty())
@@ -236,14 +233,23 @@ pub async fn start_terminal_session(
             .await
             .map_err(|_| format!("SSH connection to {target}:{port} timed out"))?
             .map_err(|error| format!("SSH connection to {target}:{port} failed: {error}"))?;
-            let authentication = handle
-                .authenticate_password(&username, password)
-                .await
-                .map_err(|error| format!("SSH authentication failed: {error}"))?;
+            let authentication = if let Some(password) = password.as_deref() {
+                handle
+                    .authenticate_password(&username, password)
+                    .await
+                    .map_err(|error| format!("SSH authentication failed: {error}"))?
+            } else {
+                handle
+                    .authenticate_none(&username)
+                    .await
+                    .map_err(|error| format!("SSH authentication failed: {error}"))?
+            };
             if !authentication.success() {
-                return Err(
-                    "SSH authentication was rejected. Check the username and password.".into(),
-                );
+                return Err(if password.is_some() {
+                    "SSH authentication was rejected. Check the username and password.".into()
+                } else {
+                    "This SSH server requires authentication before it can open a terminal. Add a password to the device profile or connect again and enter one.".into()
+                });
             }
             let channel = handle
                 .channel_open_session()

@@ -144,7 +144,7 @@ function App() {
         let connectionUsername = host.username?.trim() ?? "";
         let connectionPassword: string | undefined;
         if (protocol === "ssh") {
-          const passwordStored = await hasDevicePassword(host.id);
+          const passwordStored = await hasDevicePassword(host.id).catch(() => false);
           if (!connectionUsername || !passwordStored) {
             const credentials = await requestConnectionCredentials({ host, username: connectionUsername, requirePassword: !passwordStored });
             if (!credentials) return null;
@@ -287,11 +287,11 @@ function App() {
       </main>
       {searchOpen && <CommandPalette hosts={deviceHosts} onClose={() => setSearchOpen(false)} onConnect={connect} onNavigate={setView} />}
       {(addDeviceOpen || editingHost) && <AddDeviceModal existingHosts={deviceHosts} initialHost={editingHost ?? undefined} defaultProtocol={preferences.defaultProtocol} configuredSites={preferences.sites} configuredPlatforms={preferences.platforms} onClose={() => { setAddDeviceOpen(false); setEditingHost(null); }} onSave={async (host, password) => {
-        setDeviceHosts((current) => editingHost ? current.map((item) => item.id === host.id ? host : item) : [host, ...current]);
         if (password) {
           try { await saveDevicePassword(host.id, password); notify(`${host.name} saved with password`); }
           catch (caught) { notify((caught as Error).message); return; }
         } else notify(`${host.name} ${editingHost ? "updated" : "added"}`);
+        setDeviceHosts((current) => editingHost ? current.map((item) => item.id === host.id ? host : item) : [host, ...current]);
         setAddDeviceOpen(false); setEditingHost(null); setView("inventory");
       }} />}
       {settingsOpen && <SettingsModal preferences={preferences} onClose={() => setSettingsOpen(false)} onSave={(next) => { setPreferences(next); setSettingsOpen(false); notify("Settings saved"); }} />}
@@ -563,10 +563,10 @@ function ConnectionCredentialsModal({ request, onCancel, onConnect }: { request:
   const [savePassword, setSavePassword] = useState(false);
   const submit = (event: FormEvent) => {
     event.preventDefault();
-    if (!username.trim() || (request.requirePassword && !password)) return;
+    if (!username.trim()) return;
     onConnect({ username: username.trim(), password: password || undefined, savePassword: Boolean(password) && savePassword });
   };
-  return <div className="modal-backdrop" onMouseDown={onCancel}><form className="confirm-modal connection-credentials-modal" onSubmit={submit} onMouseDown={(event) => event.stopPropagation()}><span><KeyRound size={19} /></span><h3>Connect to {request.host.name}</h3><p>SSH requires authentication before the switch can open an interactive shell. These values can be used once without changing the inventory profile.</p><label><small>SSH username</small><div className="secret-input"><Router size={15} /><input autoFocus value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" placeholder="Network username" /></div></label>{request.requirePassword && <label><small>SSH password</small><div className="secret-input"><LockKeyhole size={15} /><input type={visible ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" placeholder="Device password" /><button type="button" onClick={() => setVisible(!visible)}>{visible ? <EyeOff size={15} /> : <Eye size={15} />}</button></div></label>}{request.requirePassword && <label className="connection-save"><input type="checkbox" checked={savePassword} onChange={(event) => setSavePassword(event.target.checked)} /><span>Save password in the operating-system vault</span></label>}<div className="password-actions"><button type="button" className="secondary-button" onClick={onCancel}>Cancel</button><button className="primary-button" disabled={!username.trim() || (request.requirePassword && !password)}>Connect</button></div></form></div>;
+  return <div className="modal-backdrop" onMouseDown={onCancel}><form className="confirm-modal connection-credentials-modal" onSubmit={submit} onMouseDown={(event) => event.stopPropagation()}><span><KeyRound size={19} /></span><h3>Connect to {request.host.name}</h3><p>SSH must send a username before a terminal can open. The password is optional only when the SSH server permits passwordless authentication.</p><label><small>SSH username</small><div className="secret-input"><Router size={15} /><input autoFocus value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" placeholder="Network username" /></div></label>{request.requirePassword && <label><small>SSH password (optional)</small><div className="secret-input"><LockKeyhole size={15} /><input type={visible ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" placeholder="Leave blank to try without a password" /><button type="button" onClick={() => setVisible(!visible)}>{visible ? <EyeOff size={15} /> : <Eye size={15} />}</button></div></label>}{request.requirePassword && password && <label className="connection-save"><input type="checkbox" checked={savePassword} onChange={(event) => setSavePassword(event.target.checked)} /><span>Save password in the operating-system vault</span></label>}<div className="password-actions"><button type="button" className="secondary-button" onClick={onCancel}>Cancel</button><button className="primary-button" disabled={!username.trim()}>{password ? "Connect" : "Try without password"}</button></div></form></div>;
 }
 
 type ToolboxTool = "subnet" | "ping" | "dns" | "port" | "wifi";
