@@ -1,6 +1,9 @@
 name: Build Windows tester installer
 
 on:
+  push:
+    branches:
+      - main
   workflow_dispatch:
 
 permissions:
