@@ -10,6 +10,7 @@ NetSSH is a modern, network-engineer-first SSH workspace for Windows and macOS, 
 - Interactive IPv4 subnet calculator with binary and capacity views
 - Native ping, traceroute, DNS, TCP port, and Wi-Fi health diagnostics
 - Switch-port auditing from timestamped status and packet-counter snapshots
+- Topology designer with inventory-linked devices, standalone network stencils, typed connections, local persistence, and JSON export
 - Locally stored, searchable, editable command snippets with Cisco IOS/IOS-XE and NX-OS defaults
 - Network-focused AI copilot with OpenAI, Gemini, and offline demo modes
 - Reusable named login profiles with passwords stored in the native OS credential vault
@@ -77,6 +78,8 @@ The Vite development server includes local Cisco IOS-XE and NX-OS test switches.
 Terminal productivity controls include Up/Down command history, Tab completion supplied by the remote device, selection copying with `Ctrl+Shift+C` or `Cmd+C`, native paste with `Ctrl+Shift+V` or `Cmd+V`, right-click paste, select-all with `Ctrl+Shift+A` or `Cmd+A`, and visible Copy, Paste, and Clear actions.
 
 The **Toolbox → Switch audit** view identifies disconnected interfaces whose packet counters remain unchanged across a chosen number of weeks. Import periodic CSV snapshots, review protected infrastructure links separately, then copy validation commands or a shutdown-review template. NetSSH never changes switch configuration automatically; a single current interface state is not treated as proof of long-term inactivity.
+
+The **Topology** workspace builds diagrams from inventory devices or standalone stencils for switches, Nexus platforms, routers, firewalls, wireless infrastructure, servers, user endpoints, clouds, and sites. Connections support Ethernet, fibre, EtherChannel, wireless, VPN, and console styles with editable interface labels. Drag devices into place and double-click an inventory node to open its terminal. Maps are saved locally and can be exported as JSON.
 
 To package unsigned installers for a trusted testing group, use `npm run package:test:mac` on macOS or `npm run package:test:windows` on Windows. A manual GitHub Actions workflow can build both platforms. See [DISTRIBUTION.md](DISTRIBUTION.md) for artifact locations, tester delivery, signing, and notarization guidance.
 

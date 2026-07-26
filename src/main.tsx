@@ -7,6 +7,7 @@ import "./interaction.css";
 import "./themes.css";
 import "./readability.css";
 import "./terminal.css";
+import "./topology.css";
 import "@xterm/xterm/css/xterm.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

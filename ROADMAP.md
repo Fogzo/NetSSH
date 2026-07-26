@@ -36,6 +36,7 @@ The roadmap is split into security and platform milestones so features that hand
 - [x] Multi-tab workspace and new-session device picker
 - [x] Side-by-side terminal sessions
 - [x] Session and opt-in AI copilot side-by-side
+- [x] Inventory-linked topology designer
 - [ ] Broadcast input with explicit safeguards
 - [ ] SFTP browser and transfer queue
 - [ ] Session logs with secret redaction

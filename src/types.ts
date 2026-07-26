@@ -1,4 +1,4 @@
-export type View = "workspace" | "inventory" | "toolbox" | "snippets" | "assistant" | "favorites" | "history" | "credentials";
+export type View = "workspace" | "inventory" | "topology" | "toolbox" | "snippets" | "assistant" | "favorites" | "history" | "credentials";
 
 export type HostStatus = "online" | "warning" | "offline";
 export type ConnectionProtocol = "ssh" | "telnet" | "serial";

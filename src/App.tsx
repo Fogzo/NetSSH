@@ -4,9 +4,9 @@ import { FitAddon } from "@xterm/addon-fit";
 import {
   Activity, Bell, Bot, BrainCircuit, Calculator, Check, ChevronDown, ChevronRight, CircleDot, ClipboardCheck, ClipboardPaste,
   Clock3, Code2, Command, Copy, Database, FileDown, FileUp, Gauge, Globe2, Grid2X2, HardDrive,
-  KeyRound, Layers3, Menu, MoreHorizontal, Network, PanelLeftClose, Pencil, Plus,
+  KeyRound, Layers3, Menu, MoreHorizontal, Network, PanelLeftClose, Pencil, Plus, Rss,
   ExternalLink, Eye, EyeOff, LockKeyhole, Radio, RefreshCw, Router, Search, Send, Server, Settings, ShieldCheck, Sparkles, Star,
-  TerminalSquare, Trash2, Wifi, Wrench, X, Zap,
+  TerminalSquare, Trash2, UserRound, Wifi, Wrench, X, Zap,
 } from "lucide-react";
 import { aiProviders, closeProviderWebApp, openProviderWebApp, providerIsConnected, removeProviderKey, resizeProviderWebApp, saveProviderKey, sendAiMessage } from "./ai";
 import { ciscoDemoHosts, hosts as initialHosts, recentCommands, snippets } from "./data";
@@ -18,11 +18,14 @@ import { deleteCredentialEnablePassword, deleteCredentialPassword, deleteDeviceP
 import { readClipboardText, writeClipboardText } from "./clipboard";
 import { analyzePortSnapshots, ciscoAuditDemoSnapshots, parsePortSnapshot, type SwitchAuditSnapshot } from "./switchAudit";
 import { createNetSshExport, createSessionCsv, decodeSessionFile, parseSessionImport, type ImportedSession, type SessionImportFormat } from "./sessionTransfer";
+import { TopologyDesigner } from "./TopologyDesigner";
+import { fetchSecurityAdvisories, openSecurityAdvisory, securityFeedFallback, type SecurityAdvisory } from "./securityFeed";
 import type { AiMessage, AiProvider, CommandSnippet, ConnectionHistory, ConnectionProtocol, CredentialProfile, Host, Session, TerminalLine, View } from "./types";
 
 const navItems: { id: View; label: string; icon: typeof TerminalSquare }[] = [
   { id: "workspace", label: "Workspace", icon: TerminalSquare },
   { id: "inventory", label: "Inventory", icon: Server },
+  { id: "topology", label: "Topology", icon: Network },
   { id: "toolbox", label: "Toolbox", icon: Wrench },
   { id: "snippets", label: "Snippets", icon: Code2 },
   { id: "assistant", label: "AI assistant", icon: Bot },
@@ -31,12 +34,20 @@ const navItems: { id: View; label: string; icon: typeof TerminalSquare }[] = [
 const statusLabel = { online: "Reachable", warning: "Attention", offline: "Offline" };
 type Appearance = "dark" | "light" | "system";
 type AppPreferences = { appearance: Appearance; compactWorkspace: boolean; showConnectionWarnings: boolean; defaultProtocol: ConnectionProtocol; sites: string[]; platforms: string[] };
+type UserProfile = { name: string; role: string; onboardingComplete: boolean };
 type AppNotification = { id: string; message: string; createdAt: number; read: boolean };
 type ConnectionCredentialRequest = { host: Host; username: string; requirePassword: boolean; credentialId?: string; credentialLabel?: string };
 type ConnectionCredentials = { username: string; password?: string; savePassword: boolean };
 const defaultPlatforms = ["Cisco IOS-XE", "Cisco NX-OS", "Arista EOS", "Juniper JunOS", "Palo Alto", "Fortinet FortiOS", "Linux", "Other"];
 const defaultSites = [...new Set(initialHosts.map((host) => host.site))].sort();
 const defaultPreferences: AppPreferences = { appearance: "dark", compactWorkspace: false, showConnectionWarnings: true, defaultProtocol: "ssh", sites: defaultSites, platforms: defaultPlatforms };
+const defaultUserProfile: UserProfile = { name: "", role: "Network Engineer", onboardingComplete: false };
+
+function profileInitials(name: string) {
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return "NE";
+  return `${parts[0][0] ?? ""}${parts.length > 1 ? parts.at(-1)?.[0] ?? "" : ""}`.toUpperCase();
+}
 
 type CiscoDemoState = { input: string; pages: string[]; history: string[]; historyIndex: number };
 
@@ -111,6 +122,7 @@ function App() {
   const [editingHost, setEditingHost] = useState<Host | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sessionTransferOpen, setSessionTransferOpen] = useState(false);
+  const [profileEditorOpen, setProfileEditorOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [connectionCredentialRequest, setConnectionCredentialRequest] = useState<ConnectionCredentialRequest | null>(null);
   const connectionCredentialResolver = useRef<((credentials: ConnectionCredentials | null) => void) | null>(null);
@@ -118,6 +130,14 @@ function App() {
   const [preferences, setPreferences] = useState<AppPreferences>(() => {
     try { return { ...defaultPreferences, ...JSON.parse(localStorage.getItem("netssh.preferences") ?? "{}") }; }
     catch { return defaultPreferences; }
+  });
+  const [userProfile, setUserProfile] = useState<UserProfile>(() => {
+    try { return { ...defaultUserProfile, ...JSON.parse(localStorage.getItem("netssh.userProfile") ?? "{}") }; }
+    catch { return defaultUserProfile; }
+  });
+  const [onboardingOpen, setOnboardingOpen] = useState(() => {
+    try { return !(JSON.parse(localStorage.getItem("netssh.userProfile") ?? "{}") as Partial<UserProfile>).onboardingComplete; }
+    catch { return true; }
   });
   const [systemDark, setSystemDark] = useState(() => window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? true);
   const [notifications, setNotifications] = useState<AppNotification[]>([
@@ -147,6 +167,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem("netssh.preferences", JSON.stringify(preferences));
   }, [preferences]);
+
+  useEffect(() => {
+    localStorage.setItem("netssh.userProfile", JSON.stringify(userProfile));
+  }, [userProfile]);
 
   useEffect(() => {
     let disposed = false;
@@ -318,13 +342,17 @@ function App() {
     }
   };
 
-  const closeSession = (id: string) => {
-    void closeTerminal(id);
-    ciscoDemoStates.current.delete(id);
-    const remaining = sessions.filter((session) => session.id !== id);
+  const closeSessions = (ids: string[]) => {
+    const closing = new Set(ids);
+    ids.forEach((id) => {
+      void closeTerminal(id);
+      ciscoDemoStates.current.delete(id);
+    });
+    const remaining = sessions.filter((session) => !closing.has(session.id));
     setSessions(remaining);
-    if (activeSession === id) setActiveSession(remaining.at(-1)?.id ?? null);
+    if (activeSession && closing.has(activeSession)) setActiveSession(remaining.at(-1)?.id ?? null);
   };
+  const closeSession = (id: string) => closeSessions([id]);
 
   const appendLines = (id: string, lines: TerminalLine[]) => {
     setSessions((current) => current.map((session) => session.id === id
@@ -420,14 +448,15 @@ function App() {
 
   return (
     <div className={`app-shell ${lightMode ? "theme-light" : "theme-dark"} ${preferences.compactWorkspace ? "compact-workspace" : ""}`}>
-      <Sidebar view={view} setView={setView} open={sidebarOpen} setOpen={setSidebarOpen} onSearch={() => setSearchOpen(true)} onOpenSettings={() => setSettingsOpen(true)} notify={notify} deviceCount={deviceHosts.length} />
+      <Sidebar view={view} setView={setView} open={sidebarOpen} setOpen={setSidebarOpen} onSearch={() => setSearchOpen(true)} onOpenSettings={() => setSettingsOpen(true)} onEditProfile={() => setProfileEditorOpen(true)} onShowOnboarding={() => setOnboardingOpen(true)} userProfile={userProfile} notify={notify} deviceCount={deviceHosts.length} />
       <main className={`main ${sidebarOpen ? "" : "main-expanded"}`}>
         <Topbar view={view} onSearch={() => setSearchOpen(true)} notifications={notifications} notificationsOpen={notificationsOpen} onToggleNotifications={() => { setNotificationsOpen((open) => !open); setSettingsOpen(false); setNotifications((current) => current.map((item) => ({ ...item, read: true }))); }} onClearNotifications={() => setNotifications([])} onOpenSettings={() => { setSettingsOpen(true); setNotificationsOpen(false); }} />
         <div className="content">
           {view === "workspace" && (
-            <Workspace sessions={sessions} activeId={activeSession} session={currentSession} hosts={deviceHosts} onActivate={setActiveSession} onClose={closeSession} onConnect={connect} onNewSession={(host) => connect(host, true)} onCommand={appendLines} onTerminalData={sendTerminalData} onAddDevice={() => setAddDeviceOpen(true)} onShowInventory={() => setView("inventory")} notify={notify} />
+            <Workspace sessions={sessions} activeId={activeSession} session={currentSession} hosts={deviceHosts} userName={userProfile.name} onActivate={setActiveSession} onClose={closeSession} onCloseMany={closeSessions} onConnect={connect} onNewSession={(host) => connect(host, true)} onCommand={appendLines} onTerminalData={sendTerminalData} onAddDevice={() => setAddDeviceOpen(true)} onShowInventory={() => setView("inventory")} notify={notify} />
           )}
           {view === "inventory" && <Inventory hosts={deviceHosts} onConnect={connect} onAdd={() => setAddDeviceOpen(true)} onTransfer={() => setSessionTransferOpen(true)} onEdit={setEditingHost} onFavorite={(id) => setDeviceHosts((current) => current.map((host) => host.id === id ? { ...host, favorite: !host.favorite } : host))} onDelete={(id) => { setDeviceHosts((current) => current.filter((host) => host.id !== id)); deleteDevicePassword(id).catch(() => undefined); notify("Device removed"); }} />}
+          {view === "topology" && <TopologyDesigner hosts={deviceHosts} onConnect={(host) => { setView("workspace"); void connect(host); }} notify={notify} />}
           {view === "toolbox" && <Toolbox hosts={deviceHosts} notify={notify} />}
           {view === "snippets" && <Snippets notify={notify} onRun={(snippet) => {
             if (!activeSession) { notify("Open a device session before running a snippet"); setView("workspace"); return; }
@@ -458,6 +487,8 @@ function App() {
         setAddDeviceOpen(false); setEditingHost(null); setView("inventory");
       }} />}
       {settingsOpen && <SettingsModal preferences={preferences} onClose={() => setSettingsOpen(false)} onSave={(next) => { setPreferences(next); setSettingsOpen(false); notify("Settings saved"); }} />}
+      {onboardingOpen && <UserProfileModal profile={userProfile} onboarding onClose={() => setOnboardingOpen(false)} onSave={(profile) => { setUserProfile(profile); setOnboardingOpen(false); notify(`Welcome to NetSSH, ${profile.name.split(" ")[0]}`); }} />}
+      {profileEditorOpen && <UserProfileModal profile={userProfile} onClose={() => setProfileEditorOpen(false)} onReset={() => { setUserProfile(defaultUserProfile); setProfileEditorOpen(false); setOnboardingOpen(true); }} onSave={(profile) => { setUserProfile(profile); setProfileEditorOpen(false); notify("Profile updated"); }} />}
       {connectionCredentialRequest && <ConnectionCredentialsModal request={connectionCredentialRequest} onCancel={() => resolveConnectionCredentials(null)} onConnect={resolveConnectionCredentials} />}
       {sessionTransferOpen && <SessionTransferModal hosts={deviceHosts} credentialProfiles={credentialProfiles} onClose={() => setSessionTransferOpen(false)} onImport={importDeviceSessions} notify={notify} />}
       {toast && <div className="toast"><Check size={16} /> {toast}</div>}
@@ -465,7 +496,7 @@ function App() {
   );
 }
 
-function Sidebar({ view, setView, open, setOpen, onSearch, onOpenSettings, notify, deviceCount }: { view: View; setView: (view: View) => void; open: boolean; setOpen: (open: boolean) => void; onSearch: () => void; onOpenSettings: () => void; notify: (message: string) => void; deviceCount: number }) {
+function Sidebar({ view, setView, open, setOpen, onSearch, onOpenSettings, onEditProfile, onShowOnboarding, userProfile, notify, deviceCount }: { view: View; setView: (view: View) => void; open: boolean; setOpen: (open: boolean) => void; onSearch: () => void; onOpenSettings: () => void; onEditProfile: () => void; onShowOnboarding: () => void; userProfile: UserProfile; notify: (message: string) => void; deviceCount: number }) {
   const [profileOpen, setProfileOpen] = useState(false);
   return (
     <aside className={`sidebar ${open ? "" : "sidebar-closed"}`}>
@@ -483,20 +514,47 @@ function Sidebar({ view, setView, open, setOpen, onSearch, onOpenSettings, notif
       </div>
       <div className="sidebar-footer">
         <div className="sync-card"><div className="sync-icon"><ShieldCheck size={17} /></div><div><strong>Local vault</strong><small>Encrypted & secure</small></div><span className="status-dot" /></div>
-        <div className="profile-wrap">{profileOpen && <div className="profile-menu"><button onClick={() => { setProfileOpen(false); onOpenSettings(); }}><Settings size={14} /><span><strong>Preferences</strong><small>Workspace, sites, and platforms</small></span></button><button onClick={() => { setProfileOpen(false); setView("credentials"); }}><KeyRound size={14} /><span><strong>Credential vault</strong><small>Manage reusable logins</small></span></button><button onClick={() => { setProfileOpen(false); notify("NetSSH 0.1.0 · Local workspace"); }}><Network size={14} /><span><strong>About NetSSH</strong><small>Version 0.1.0</small></span></button></div>}<button className="profile" aria-label="Open profile menu" onClick={() => setProfileOpen((value) => !value)}><span className="avatar">NE</span><span><strong>Network Engineer</strong><small>Local workspace</small></span><MoreHorizontal size={18} /></button></div>
+        <div className="profile-wrap">{profileOpen && <div className="profile-menu"><button onClick={() => { setProfileOpen(false); onEditProfile(); }}><UserRound size={14} /><span><strong>Your profile</strong><small>Name and role</small></span></button><button onClick={() => { setProfileOpen(false); onOpenSettings(); }}><Settings size={14} /><span><strong>Preferences</strong><small>Workspace, sites, and platforms</small></span></button><button onClick={() => { setProfileOpen(false); setView("credentials"); }}><KeyRound size={14} /><span><strong>Credential vault</strong><small>Manage reusable logins</small></span></button><button onClick={() => { setProfileOpen(false); onShowOnboarding(); }}><Sparkles size={14} /><span><strong>Welcome tour</strong><small>Review the NetSSH basics</small></span></button><button onClick={() => { setProfileOpen(false); notify("NetSSH 0.1.2 · Local workspace"); }}><Network size={14} /><span><strong>About NetSSH</strong><small>Version 0.1.2</small></span></button></div>}<button className="profile" aria-label="Open profile menu" onClick={() => setProfileOpen((value) => !value)}><span className="avatar">{profileInitials(userProfile.name)}</span><span><strong>{userProfile.name || "Network Engineer"}</strong><small>{userProfile.role || "Local workspace"}</small></span><MoreHorizontal size={18} /></button></div>
       </div>
     </aside>
   );
 }
 
 function Topbar({ view, onSearch, notifications, notificationsOpen, onToggleNotifications, onClearNotifications, onOpenSettings }: { view: View; onSearch: () => void; notifications: AppNotification[]; notificationsOpen: boolean; onToggleNotifications: () => void; onClearNotifications: () => void; onOpenSettings: () => void }) {
-  const titles: Record<View, string> = { workspace: "Workspace", inventory: "Device inventory", toolbox: "Network toolbox", snippets: "Command snippets", assistant: "AI assistant", favorites: "Favourite devices", history: "Connection history", credentials: "Credential vault" };
+  const titles: Record<View, string> = { workspace: "Workspace", inventory: "Device inventory", topology: "Network topology", toolbox: "Network toolbox", snippets: "Command snippets", assistant: "AI assistant", favorites: "Favourite devices", history: "Connection history", credentials: "Credential vault" };
   const unread = notifications.filter((item) => !item.read).length;
   return <header className="topbar"><div><h1>{titles[view]}</h1><span className="breadcrumb">NetSSH <ChevronRight size={12} /> {titles[view]}</span></div><div className="top-actions"><button className="mini-search" onClick={onSearch}><Search size={15} /> Quick search</button><div className="top-popover-wrap"><button className={`icon-button ${notificationsOpen ? "active" : ""}`} aria-label="Notifications" onClick={onToggleNotifications}><Bell size={18} />{unread > 0 && <em className="notification-count">{unread}</em>}</button>{notificationsOpen && <NotificationCenter notifications={notifications} onClear={onClearNotifications} />}</div><button className="icon-button" aria-label="Settings" onClick={onOpenSettings}><Settings size={18} /></button></div></header>;
 }
 
 function NotificationCenter({ notifications, onClear }: { notifications: AppNotification[]; onClear: () => void }) {
   return <section className="notification-center"><div><strong>Notifications</strong>{notifications.length > 0 && <button onClick={onClear}>Clear all</button>}</div>{notifications.length ? <div className="notification-list">{notifications.map((item) => <article key={item.id}><span><Bell size={13} /></span><div><p>{item.message}</p><small>{new Date(item.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}</small></div></article>)}</div> : <div className="notification-empty"><Check size={20} /><span>You’re all caught up</span></div>}</section>;
+}
+
+function UserProfileModal({ profile, onboarding = false, onClose, onReset, onSave }: { profile: UserProfile; onboarding?: boolean; onClose: () => void; onReset?: () => void; onSave: (profile: UserProfile) => void }) {
+  const [step, setStep] = useState(onboarding ? 0 : 1);
+  const [name, setName] = useState(profile.name);
+  const [role, setRole] = useState(profile.role || "Network Engineer");
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (step === 0) { setStep(1); return; }
+    const cleanName = name.trim();
+    if (!cleanName) return;
+    onSave({ name: cleanName, role: role.trim() || "Network Engineer", onboardingComplete: true });
+  };
+  return <div className="modal-backdrop onboarding-backdrop" onMouseDown={onClose}><form className="onboarding-modal" onSubmit={submit} onMouseDown={(event) => event.stopPropagation()}>
+    <button type="button" className="onboarding-close" onClick={onClose} aria-label="Close onboarding"><X size={17} /></button>
+    {step === 0 ? <>
+      <div className="onboarding-brand"><span><Network size={25} /></span><strong>NetSSH</strong></div>
+      <div className="onboarding-intro"><span className="eyebrow"><Sparkles size={13} /> Welcome aboard</span><h2>Your network engineering workspace</h2><p>Keep connections, diagnostics, topology designs, reusable commands, and vendor advisories together in one focused application.</p></div>
+      <div className="onboarding-features"><div><span><TerminalSquare size={18} /></span><strong>Connect</strong><small>SSH, Telnet, and Serial sessions with tabs and split panes.</small></div><div><span><Wrench size={18} /></span><strong>Troubleshoot</strong><small>Subnet, Wi-Fi, DNS, ping, trace, port, and switch-audit tools.</small></div><div><span><ShieldCheck size={18} /></span><strong>Work locally</strong><small>Profiles and inventory stay on this device; secrets use the OS vault.</small></div></div>
+      <div className="onboarding-footer"><span>Step 1 of 2</span><button className="primary-button">Set up my workspace <ChevronRight size={15} /></button></div>
+    </> : <>
+      <div className="onboarding-profile-head"><span className="profile-preview">{profileInitials(name)}</span><div><span className="eyebrow"><UserRound size={13} /> Local profile</span><h2>{onboarding ? "Make NetSSH yours" : "Your profile"}</h2><p>This name is shown only inside your local NetSSH workspace.</p></div></div>
+      <div className="onboarding-fields"><label><span>Your name</span><input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="Alex Morgan" autoComplete="name" /></label><label><span>Role or team</span><input value={role} onChange={(event) => setRole(event.target.value)} placeholder="Network Engineer" /></label></div>
+      <div className="profile-privacy"><ShieldCheck size={15} /><span>Your profile is stored locally and is never included in AI prompts or exported session files.</span></div>
+      <div className="onboarding-footer">{onReset && <button type="button" className="profile-reset" onClick={onReset}>Reset onboarding</button>}<button type="button" className="onboarding-back" onClick={() => onboarding ? setStep(0) : onClose()}>{onboarding ? "Back" : "Cancel"}</button><span>{onboarding ? "Step 2 of 2" : "Local profile"}</span><button className="primary-button" disabled={!name.trim()}>{onboarding ? "Finish setup" : "Save profile"}</button></div>
+    </>}
+  </form></div>;
 }
 
 function SettingsModal({ preferences, onClose, onSave }: { preferences: AppPreferences; onClose: () => void; onSave: (preferences: AppPreferences) => void }) {
@@ -514,13 +572,15 @@ function ConfigList({ title, description, items, placeholder, onChange }: { titl
   return <section className="config-list"><div><strong>{title}</strong><small>{description}</small></div><div className="config-chips">{items.map((item) => <span key={item}>{item}<button aria-label={`Remove ${item}`} onClick={() => onChange(items.filter((value) => value !== item))}><X size={11} /></button></span>)}</div><div className="config-add"><input value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); add(); } }} placeholder={placeholder} /><button onClick={add}><Plus size={13} /> Add</button></div></section>;
 }
 
-function Workspace({ sessions, activeId, session, hosts, onActivate, onClose, onConnect, onNewSession, onCommand, onTerminalData, onAddDevice, onShowInventory, notify }: { sessions: Session[]; activeId: string | null; session?: Session; hosts: Host[]; onActivate: (id: string) => void; onClose: (id: string) => void; onConnect: (host: Host) => void; onNewSession: (host: Host) => Promise<string | null>; onCommand: (id: string, lines: TerminalLine[]) => void; onTerminalData: (id: string, data: string) => void; onAddDevice: () => void; onShowInventory: () => void; notify: (message: string) => void }) {
+function Workspace({ sessions, activeId, session, hosts, userName, onActivate, onClose, onCloseMany, onConnect, onNewSession, onCommand, onTerminalData, onAddDevice, onShowInventory, notify }: { sessions: Session[]; activeId: string | null; session?: Session; hosts: Host[]; userName: string; onActivate: (id: string) => void; onClose: (id: string) => void; onCloseMany: (ids: string[]) => void; onConnect: (host: Host) => void; onNewSession: (host: Host) => Promise<string | null>; onCommand: (id: string, lines: TerminalLine[]) => void; onTerminalData: (id: string, data: string) => void; onAddDevice: () => void; onShowInventory: () => void; notify: (message: string) => void }) {
   const [layout, setLayout] = useState<"single" | "split" | "ai">("single");
   const [primaryId, setPrimaryId] = useState<string | null>(activeId);
   const [secondaryId, setSecondaryId] = useState<string | null>(null);
   const [focusedPane, setFocusedPane] = useState<string | null>(activeId);
   const [pickerMode, setPickerMode] = useState<"tab" | "split" | null>(null);
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
+  const [tabContextMenu, setTabContextMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const [aiWebMode, setAiWebMode] = useState(false);
   const primary = sessions.find((item) => item.id === primaryId) ?? session;
   const secondary = sessions.find((item) => item.id === secondaryId);
   useEffect(() => {
@@ -540,7 +600,16 @@ function Workspace({ sessions, activeId, session, hosts, onActivate, onClose, on
   useEffect(() => {
     if (layout !== "split" || (focusedPane !== primary?.id && focusedPane !== secondaryId)) setFocusedPane(primary?.id ?? null);
   }, [layout, primary?.id, secondaryId, focusedPane]);
-  if (!session || !primary) return <WorkspaceHome hosts={hosts} onConnect={onConnect} onAddDevice={onAddDevice} onShowInventory={onShowInventory} />;
+  useEffect(() => {
+    if (!tabContextMenu) return;
+    const closeMenu = () => setTabContextMenu(null);
+    const closeOnEscape = (event: KeyboardEvent) => { if (event.key === "Escape") closeMenu(); };
+    window.addEventListener("click", closeMenu);
+    window.addEventListener("blur", closeMenu);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => { window.removeEventListener("click", closeMenu); window.removeEventListener("blur", closeMenu); window.removeEventListener("keydown", closeOnEscape); };
+  }, [tabContextMenu]);
+  if (!session || !primary) return <WorkspaceHome hosts={hosts} userName={userName} onConnect={onConnect} onAddDevice={onAddDevice} onShowInventory={onShowInventory} />;
   const toggleSplit = () => {
     if (layout === "split") { setLayout("single"); return; }
     const available = sessions.find((item) => item.id !== primary.id);
@@ -576,13 +645,14 @@ function Workspace({ sessions, activeId, session, hosts, onActivate, onClose, on
   return (
     <section className="terminal-layout">
       <div className="session-tabs">
-        {sessions.map((item) => <button key={item.id} className={`session-tab ${item.id === activeId ? "active" : ""}`} onClick={() => activateTab(item.id)}><span className={`device-state ${item.host.status}`} /><span>{item.host.name}</span><X size={13} onClick={(event) => { event.stopPropagation(); onClose(item.id); }} /></button>)}
+        {sessions.map((item) => <button key={item.id} className={`session-tab ${item.id === activeId ? "active" : ""}`} onClick={() => activateTab(item.id)} onContextMenu={(event) => { event.preventDefault(); setSessionMenuOpen(false); setTabContextMenu({ id: item.id, x: Math.min(event.clientX, window.innerWidth - 225), y: Math.min(event.clientY, window.innerHeight - 145) }); }}><span className={`device-state ${item.host.status}`} /><span>{item.host.name}</span><X size={13} onClick={(event) => { event.stopPropagation(); onClose(item.id); }} /></button>)}
         <button className="new-tab" aria-label="Open new session tab" title="Open new session tab" onClick={() => setPickerMode("tab")}><Plus size={15} /></button>
       </div>
-      <div className="terminal-toolbar"><div><CircleDot size={14} /><strong>{primary.host.name}</strong><span>{primary.host.address}</span></div><div><span className="latency"><Activity size={13} /> {primary.host.latency ?? "—"} ms</span><button className={layout === "split" ? "toolbar-active" : ""} aria-label="Toggle split sessions" title="Toggle split sessions" onClick={toggleSplit}><Grid2X2 size={15} /></button><button className={layout === "ai" ? "toolbar-active" : ""} aria-label="Toggle AI side panel" title="Toggle AI side panel" onClick={() => setLayout(layout === "ai" ? "single" : "ai")}><Bot size={15} /></button><div className="session-menu-wrap"><button className={sessionMenuOpen ? "toolbar-active" : ""} aria-label="Session options" onClick={() => setSessionMenuOpen((open) => !open)}><MoreHorizontal size={16} /></button>{sessionMenuOpen && <div className="session-menu"><button onClick={async () => { setSessionMenuOpen(false); await onNewSession(primary.host); }}><Plus size={14} /><span><strong>Duplicate tab</strong><small>Open another independent session</small></span></button><button onClick={() => { setSessionMenuOpen(false); toggleSplit(); }}><Grid2X2 size={14} /><span><strong>{layout === "split" ? "Close split view" : "Split with session"}</strong><small>{layout === "split" ? "Return to one pane" : "Choose a second device pane"}</small></span></button><button onClick={() => { navigator.clipboard?.writeText(primary.host.address); setSessionMenuOpen(false); notify("Address copied"); }}><Copy size={14} /><span><strong>Copy address</strong><small>{primary.host.address}</small></span></button>{primary.host.credentialId && <button onClick={() => { setSessionMenuOpen(false); writeTerminalEnablePassword(primary.id, primary.host.credentialId!).then(() => notify("Enable password sent securely")).catch((caught) => notify((caught as Error).message)); }}><KeyRound size={14} /><span><strong>Send enable password</strong><small>Use only at the device enable prompt</small></span></button>}<button className="menu-danger" onClick={() => { setSessionMenuOpen(false); onClose(primary.id); }}><Trash2 size={14} /><span><strong>Close session</strong><small>Close this workspace tab</small></span></button></div>}</div></div></div>
+      {tabContextMenu && <div className="tab-context-menu" style={{ left: tabContextMenu.x, top: tabContextMenu.y }} onClick={(event) => event.stopPropagation()}><button onClick={() => { onClose(tabContextMenu.id); setTabContextMenu(null); }}><X size={14} /><span>Close tab</span></button><button disabled={sessions.length < 2} onClick={() => { onCloseMany(sessions.filter((item) => item.id !== tabContextMenu.id).map((item) => item.id)); setTabContextMenu(null); }}><Layers3 size={14} /><span>Close other tabs</span></button><div /><button className="menu-danger" onClick={() => { onCloseMany(sessions.map((item) => item.id)); setTabContextMenu(null); }}><Trash2 size={14} /><span>Close all tabs</span></button></div>}
+      <div className="terminal-toolbar"><div><CircleDot size={14} /><strong>{primary.host.name}</strong><span>{primary.host.address}</span></div><div><span className="latency"><Activity size={13} /> {primary.host.latency ?? "—"} ms</span><button className={layout === "split" ? "toolbar-active" : ""} aria-label="Toggle split sessions" title="Toggle split sessions" onClick={toggleSplit}><Grid2X2 size={15} /></button><button className={layout === "ai" ? "toolbar-active" : ""} aria-label="Toggle AI side panel" title="Toggle AI side panel" onClick={() => setLayout(layout === "ai" ? "single" : "ai")}><Bot size={15} /></button><div className="session-menu-wrap"><button className={sessionMenuOpen ? "toolbar-active" : ""} aria-label="Session options" onClick={() => { setTabContextMenu(null); setSessionMenuOpen((open) => !open); }}><MoreHorizontal size={16} /></button>{sessionMenuOpen && <div className="session-menu"><button onClick={async () => { setSessionMenuOpen(false); await onNewSession(primary.host); }}><Plus size={14} /><span><strong>Duplicate tab</strong><small>Open another independent session</small></span></button><button onClick={() => { setSessionMenuOpen(false); toggleSplit(); }}><Grid2X2 size={14} /><span><strong>{layout === "split" ? "Close split view" : "Split with session"}</strong><small>{layout === "split" ? "Return to one pane" : "Choose a second device pane"}</small></span></button><button onClick={() => { navigator.clipboard?.writeText(primary.host.address); setSessionMenuOpen(false); notify("Address copied"); }}><Copy size={14} /><span><strong>Copy address</strong><small>{primary.host.address}</small></span></button>{primary.host.credentialId && <button onClick={() => { setSessionMenuOpen(false); writeTerminalEnablePassword(primary.id, primary.host.credentialId!).then(() => notify("Enable password sent securely")).catch((caught) => notify((caught as Error).message)); }}><KeyRound size={14} /><span><strong>Send enable password</strong><small>Use only at the device enable prompt</small></span></button>}<button className="menu-danger" onClick={() => { setSessionMenuOpen(false); onClose(primary.id); }}><Trash2 size={14} /><span><strong>Close session</strong><small>Close this workspace tab</small></span></button><button className="menu-danger" onClick={() => { setSessionMenuOpen(false); onCloseMany(sessions.map((item) => item.id)); }}><Trash2 size={14} /><span><strong>Close all sessions</strong><small>Close every workspace tab</small></span></button></div>}</div></div></div>
       {layout === "single" && <Terminal session={primary} onData={(data) => onTerminalData(primary.id, data)} />}
       {layout === "split" && secondary && <div className="workspace-panes"><SessionPane session={primary} sessions={sessions} excludedId={secondary.id} active={focusedPane === primary.id} onSelect={selectPrimary} onActivate={() => setFocusedPane(primary.id)} onData={(data) => onTerminalData(primary.id, data)} /><SessionPane session={secondary} sessions={sessions} excludedId={primary.id} active={focusedPane === secondary.id} onSelect={selectSecondary} onActivate={() => setFocusedPane(secondary.id)} onData={(data) => onTerminalData(secondary.id, data)} /></div>}
-      {layout === "ai" && <div className="workspace-panes ai-workspace"><SessionPane session={primary} sessions={sessions} active onSelect={(id) => { setPrimaryId(id); onActivate(id); }} onActivate={() => onActivate(primary.id)} onData={(data) => onTerminalData(primary.id, data)} /><AiSidePanel session={primary} notify={notify} /></div>}
+      {layout === "ai" && <div className={`workspace-panes ai-workspace ${aiWebMode ? "web-provider-workspace" : ""}`}><SessionPane session={primary} sessions={sessions} active onSelect={(id) => { setPrimaryId(id); onActivate(id); }} onActivate={() => onActivate(primary.id)} onData={(data) => onTerminalData(primary.id, data)} /><AiSidePanel session={primary} notify={notify} onWebModeChange={setAiWebMode} /></div>}
       {pickerMode && <SessionPicker hosts={hosts} title={pickerMode === "split" ? "Open session beside this one" : "Open a new session tab"} onClose={() => setPickerMode(null)} onSelect={selectDevice} onAddDevice={() => { setPickerMode(null); onAddDevice(); }} />}
     </section>
   );
@@ -598,7 +668,7 @@ function SessionPicker({ hosts, title, onClose, onSelect, onAddDevice }: { hosts
   return <div className="modal-backdrop" onMouseDown={onClose}><section className="session-picker" onMouseDown={(event) => event.stopPropagation()}><div className="provider-modal-head"><div><span><TerminalSquare size={18} /></span><div><h3>{title}</h3><p>Each selection creates an independent workspace tab.</p></div></div><button onClick={onClose}><X size={17} /></button></div><div className="picker-search"><Search size={16} /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search devices by name, address, site, or platform" /></div><div className="picker-devices">{filtered.map((host) => <button key={host.id} onClick={() => onSelect(host)}><span className="device-icon"><Router size={17} /></span><span><strong>{host.name}</strong><small>{host.address} · {host.site}</small></span><span className="protocol-pill">{(host.protocol ?? "ssh").toUpperCase()}</span><ChevronRight size={15} /></button>)}{filtered.length === 0 && <div className="picker-empty"><Search size={22} /><span>No matching devices</span></div>}</div><div className="picker-footer"><span>{hosts.length} inventory devices</span><button className="secondary-button" onClick={onAddDevice}><Plus size={14} /> Add device</button></div></section></div>;
 }
 
-function AiSidePanel({ session, notify }: { session: Session; notify: (message: string) => void }) {
+function AiSidePanel({ session, notify, onWebModeChange }: { session: Session; notify: (message: string) => void; onWebModeChange: (active: boolean) => void }) {
   const [provider, setProvider] = useState<AiProvider>("demo");
   const [webProvider, setWebProvider] = useState<"openai" | "gemini" | null>(null);
   const [messages, setMessages] = useState<AiMessage[]>([{ ...assistantWelcome, id: `side-welcome-${session.id}`, content: `I’m ready to help with ${session.host.name}. Enable session context below if you want to include recent terminal output.` }]);
@@ -609,6 +679,10 @@ function AiSidePanel({ session, notify }: { session: Session; notify: (message: 
   const bottomRef = useRef<HTMLDivElement>(null);
   useEffect(() => { Promise.all([providerIsConnected("openai"), providerIsConnected("gemini")]).then(([openai, gemini]) => setConnected({ openai, gemini })); }, []);
   useEffect(() => { bottomRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, sending]);
+  useEffect(() => {
+    onWebModeChange(webProvider !== null);
+    return () => onWebModeChange(false);
+  }, [webProvider, onWebModeChange]);
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     const clean = draft.trim();
@@ -637,16 +711,42 @@ function AiSidePanel({ session, notify }: { session: Session; notify: (message: 
     setWebProvider(null);
     setProvider(value as AiProvider);
   };
-  return <aside className="workspace-ai"><div className="workspace-ai-head"><div><span><BrainCircuit size={16} /></span><div><strong>Network copilot</strong><small>Beside {session.host.name}</small></div></div><div className="provider-select"><span className="provider-dot" style={{ background: aiProviders[webProvider ?? provider].accent }} /><select value={webProvider ? `${webProvider}-web` : provider} onChange={(event) => selectProvider(event.target.value)} aria-label="Side panel AI provider"><option value="demo">Demo</option><option value="openai">OpenAI API</option><option value="gemini">Gemini API</option><option value="openai-web">ChatGPT Web</option><option value="gemini-web">Gemini Web</option></select><ChevronDown size={13} /></div></div>{webProvider ? <EmbeddedProviderView provider={webProvider} onClose={() => setWebProvider(null)} notify={notify} compact /> : <><div className="workspace-ai-notice"><ShieldCheck size={13} />Session output is excluded unless you enable context.</div><div className="side-chat-scroll">{messages.map((message) => <ChatMessage key={message.id} message={message} provider={provider} />)}{sending && <div className="chat-message assistant-message"><span className="message-avatar"><Bot size={15} /></span><div className="message-bubble typing"><i /><i /><i /></div></div>}<div ref={bottomRef} /></div><form className="side-composer" onSubmit={submit}><textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Ask about this session…" rows={3} /><label><input type="checkbox" checked={attachContext} onChange={(event) => setAttachContext(event.target.checked)} /><span><Layers3 size={12} /> Include recent session context</span></label><button className="primary-button" disabled={!draft.trim() || sending}><Send size={14} /> Send</button></form></>}</aside>;
+  return <aside className="workspace-ai"><div className="workspace-ai-head"><div><span><BrainCircuit size={16} /></span><div><strong>Network copilot</strong><small>Beside {session.host.name}</small></div></div><div className="provider-select"><span className="provider-dot" style={{ background: aiProviders[webProvider ?? provider].accent }} /><select value={webProvider ? `${webProvider}-web` : provider} onChange={(event) => selectProvider(event.target.value)} aria-label="Side panel AI provider"><option value="demo">Demo</option><option value="openai">OpenAI API</option><option value="gemini">Gemini API</option><option value="openai-web">ChatGPT Web</option><option value="gemini-web">Gemini Web</option></select><ChevronDown size={13} /></div></div>{webProvider ? <EmbeddedProviderView provider={webProvider} notify={notify} compact /> : <><div className="workspace-ai-notice"><ShieldCheck size={13} />Session output is excluded unless you enable context.</div><div className="side-chat-scroll">{messages.map((message) => <ChatMessage key={message.id} message={message} provider={provider} />)}{sending && <div className="chat-message assistant-message"><span className="message-avatar"><Bot size={15} /></span><div className="message-bubble typing"><i /><i /><i /></div></div>}<div ref={bottomRef} /></div><form className="side-composer" onSubmit={submit}><textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Ask about this session…" rows={3} /><label><input type="checkbox" checked={attachContext} onChange={(event) => setAttachContext(event.target.checked)} /><span><Layers3 size={12} /> Include recent session context</span></label><button className="primary-button" disabled={!draft.trim() || sending}><Send size={14} /> Send</button></form></>}</aside>;
 }
 
-function WorkspaceHome({ hosts, onConnect, onAddDevice, onShowInventory }: { hosts: Host[]; onConnect: (host: Host) => void; onAddDevice: () => void; onShowInventory: () => void }) {
+function WorkspaceHome({ hosts, userName, onConnect, onAddDevice, onShowInventory }: { hosts: Host[]; userName: string; onConnect: (host: Host) => void; onAddDevice: () => void; onShowInventory: () => void }) {
+  const [advisories, setAdvisories] = useState<SecurityAdvisory[]>(securityFeedFallback);
+  const [feedLoading, setFeedLoading] = useState(true);
+  const [feedStatus, setFeedStatus] = useState("Loading official feeds");
+  const refreshFeed = async () => {
+    setFeedLoading(true);
+    try {
+      const latest = await fetchSecurityAdvisories();
+      setAdvisories(latest);
+      setFeedStatus(latest === securityFeedFallback ? "Official source shortcuts" : "Live · Cisco and Fortinet");
+    } catch {
+      setAdvisories(securityFeedFallback);
+      setFeedStatus("Feed unavailable · official links shown");
+    } finally {
+      setFeedLoading(false);
+    }
+  };
+  useEffect(() => { void refreshFeed(); }, []);
   return (
     <div className="page workspace-home">
-      <section className="hero-card">
-        <div className="hero-copy"><span className="eyebrow"><Sparkles size={14} /> Network operations, simplified</span><h2>Your network.<br /><span>One command away.</span></h2><p>Connect, troubleshoot, and move through your infrastructure without breaking your flow.</p><div className="hero-actions"><button className="primary-button" onClick={() => hosts[0] ? onConnect(hosts[0]) : onAddDevice()}><TerminalSquare size={17} /> New session</button><button className="secondary-button" onClick={onAddDevice}><Plus size={17} /> Add device</button></div></div>
-        <div className="hero-visual"><div className="pulse p1" /><div className="pulse p2" /><div className="network-orb"><Network size={44} /></div><span className="node n1"><Router size={17} /></span><span className="node n2"><ShieldCheck size={17} /></span><span className="node n3"><Server size={17} /></span></div>
-      </section>
+      <div className="workspace-overview">
+        <section className="welcome-card">
+          <span className="welcome-icon"><TerminalSquare size={21} /></span>
+          <div className="welcome-copy"><span className="eyebrow"><Sparkles size={13} /> NetSSH workspace</span><h2>Welcome back{userName ? `, ${userName.split(/\s+/)[0]}` : ""}</h2><p>Select a recent device or start a new connection.</p></div>
+          <div className="welcome-actions"><button className="primary-button" onClick={() => hosts[0] ? onConnect(hosts[0]) : onAddDevice()}><TerminalSquare size={16} /> Connect</button><button className="secondary-button" onClick={onAddDevice}><Plus size={16} /> Add device</button></div>
+          <div className="welcome-devices">{hosts.slice(0, 3).map((host) => <button key={host.id} onClick={() => onConnect(host)}><span className={`device-state ${host.status}`} /><span><strong>{host.name}</strong><small>{host.address}</small></span><ChevronRight size={14} /></button>)}</div>
+        </section>
+        <section className="panel security-feed-panel">
+          <div className="panel-title"><div><h3><Rss size={15} /> Network security feed</h3><p>{feedStatus}</p></div><button className={feedLoading ? "feed-refresh loading" : "feed-refresh"} onClick={() => void refreshFeed()} disabled={feedLoading} aria-label="Refresh network security feed"><RefreshCw size={15} /></button></div>
+          <div className="security-feed-list">{advisories.slice(0, 5).map((advisory) => <button className="security-feed-row" key={advisory.id} onClick={() => void openSecurityAdvisory(advisory.url)}><span className={`advisory-vendor ${advisory.vendor.toLowerCase()}`}>{advisory.vendor}</span><span className="advisory-copy"><strong>{advisory.title}</strong><small>{advisory.published}</small></span><span className={`advisory-severity ${advisory.severity.toLowerCase()}`}>{advisory.severity}</span><ExternalLink size={13} /></button>)}</div>
+          <div className="security-feed-note"><ShieldCheck size={13} /> Always confirm affected releases in the vendor advisory before changing software.</div>
+        </section>
+      </div>
       <div className="section-heading"><div><h3>Jump back in</h3><p>Your recently accessed devices</p></div><button onClick={onShowInventory}>View inventory <ChevronRight size={15} /></button></div>
       <div className="device-grid">{hosts.slice(0, 4).map((host) => <DeviceCard key={host.id} host={host} onConnect={onConnect} />)}</div>
       <div className="dashboard-grid">
@@ -1163,19 +1263,19 @@ function AiAssistant({ notify }: { notify: (message: string) => void }) {
     <section className="assistant-main">
       <div className="assistant-header">
         <div className="assistant-title"><span><BrainCircuit size={20} /></span><div><h2>Network copilot</h2><p>Advice grounded in safe operational practice</p></div></div>
-        <div className="provider-select">
-          <span className="provider-dot" style={{ background: aiProviders[provider].accent }} />
+        <div className="assistant-provider-controls"><div className="provider-select">
+          <span className="provider-dot" style={{ background: aiProviders[webProvider ?? provider].accent }} />
           <select value={webProvider ? `${webProvider}-web` : provider} onChange={(event) => selectProvider(event.target.value)} aria-label="AI provider">
             <option value="demo">NetSSH Demo · Offline</option>
             <option value="openai">OpenAI API · Integrated context</option>
             <option value="gemini">Gemini API · Integrated context</option>
-            <option value="openai-web">ChatGPT Web · Existing login</option>
-            <option value="gemini-web">Gemini Web · Existing login</option>
+            <option value="openai-web">ChatGPT Web</option>
+            <option value="gemini-web">Gemini Web</option>
           </select>
           <ChevronDown size={14} />
-        </div>
+        </div>{webProvider && <button type="button" className="web-provider-close" onClick={() => setWebProvider(null)} aria-label="Close embedded web chat" title="Close web chat"><X size={15} /><span>Close</span></button>}</div>
       </div>
-      {webProvider ? <EmbeddedProviderView provider={webProvider} onClose={() => setWebProvider(null)} notify={notify} /> : <><div className="assistant-notice"><ShieldCheck size={14} /><span>AI suggestions can be wrong. Review commands and configuration changes before applying them.</span></div>
+      {webProvider ? <EmbeddedProviderView provider={webProvider} notify={notify} /> : <><div className="assistant-notice"><ShieldCheck size={14} /><span>AI suggestions can be wrong. Review commands and configuration changes before applying them.</span></div>
       <div className="chat-scroll">
         <div className="message-list">
           {messages.map((message) => <ChatMessage key={message.id} message={message} provider={provider} />)}
@@ -1200,7 +1300,7 @@ function AiAssistant({ notify }: { notify: (message: string) => void }) {
   </div>;
 }
 
-function EmbeddedProviderView({ provider, onClose, notify, compact = false }: { provider: "openai" | "gemini"; onClose: () => void; notify: (message: string) => void; compact?: boolean }) {
+function EmbeddedProviderView({ provider, notify, compact = false }: { provider: "openai" | "gemini"; notify: (message: string) => void; compact?: boolean }) {
   const surfaceRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -1237,7 +1337,7 @@ function EmbeddedProviderView({ provider, onClose, notify, compact = false }: { 
     };
   }, [provider, notify]);
 
-  return <section className={`embedded-provider ${compact ? "compact" : ""}`}><div className="embedded-provider-bar"><div><Globe2 size={15} /><span><strong>{provider === "openai" ? "ChatGPT Web" : "Gemini Web"}</strong><small>Terminal context is not shared</small></span></div><button onClick={onClose}><X size={15} /><span>{compact ? "Close" : "Close web chat"}</span></button></div><div className="embedded-provider-surface" ref={surfaceRef}><RefreshCw className="spin" size={20} /><span>Loading secure provider view…</span></div></section>;
+  return <section className={`embedded-provider ${compact ? "compact" : ""}`}>{compact && <div className="embedded-provider-guard"><ShieldCheck size={13} /><span>Isolated provider web session</span></div>}<div className="embedded-provider-surface" ref={surfaceRef}><RefreshCw className="spin" size={20} /><span>Loading secure provider view…</span></div></section>;
 }
 
 function ChatMessage({ message, provider }: { message: AiMessage; provider: AiProvider }) {
