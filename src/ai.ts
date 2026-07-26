@@ -36,10 +36,20 @@ export async function sendAiMessage(provider: AiProvider, messages: AiMessage[])
   });
 }
 
-export async function openProviderWebApp(provider: "openai" | "gemini"): Promise<void> {
+export type EmbeddedWebviewBounds = { x: number; y: number; width: number; height: number };
+
+export async function openProviderWebApp(provider: "openai" | "gemini", bounds?: EmbeddedWebviewBounds): Promise<void> {
   const url = provider === "openai" ? "https://chatgpt.com/" : "https://gemini.google.com/app";
-  if (isTauri()) await invoke("open_ai_webview", { provider });
+  if (isTauri() && bounds) await invoke("open_ai_webview", { provider, bounds });
   else window.open(url, "_blank", "noopener,noreferrer");
+}
+
+export async function resizeProviderWebApp(bounds: EmbeddedWebviewBounds): Promise<void> {
+  if (isTauri()) await invoke("resize_ai_webview", { bounds });
+}
+
+export async function closeProviderWebApp(): Promise<void> {
+  if (isTauri()) await invoke("close_ai_webview");
 }
 
 function demoResponse(prompt: string): Promise<string> {

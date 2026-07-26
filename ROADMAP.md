@@ -28,7 +28,7 @@ The roadmap is split into security and platform milestones so features that hand
 - [ ] Strict known-host verification and fingerprint workflow
 - [ ] Jump hosts, proxies, keepalives, and reconnect policy
 - [ ] Full terminal emulation, resize, colours, and keyboard modes
-- [x] OS-backed device password records
+- [x] OS-backed reusable login profiles with device assignments
 - [ ] SQLite inventory migration and backup/restore
 
 ## Phase 3 — Engineer workflows

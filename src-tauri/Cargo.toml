@@ -1,6 +1,6 @@
 [package]
 name = "netssh"
-version = "0.1.0"
+version = "0.1.1"
 description = "A modern SSH workspace for network engineers"
 authors = ["NetSSH"]
 edition = "2021"
@@ -15,8 +15,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["unstable"] }
 tauri-plugin-opener = "2"
+tauri-plugin-clipboard-manager = "2"
 keyring = "3"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
 tokio = { version = "1", features = ["io-util", "net", "process", "sync", "time"] }

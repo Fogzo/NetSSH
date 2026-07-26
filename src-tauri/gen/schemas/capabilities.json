@@ -1,1 +1,1 @@
-{"default":{"identifier":"default","description":"Permissions for the local NetSSH application window","local":true,"windows":["main"],"permissions":["core:default","opener:default"]}}
+{"default":{"identifier":"default","description":"Permissions for the local NetSSH application window","local":true,"windows":["main"],"permissions":["core:default","opener:default","clipboard-manager:allow-read-text","clipboard-manager:allow-write-text"]}}

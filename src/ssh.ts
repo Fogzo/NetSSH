@@ -25,6 +25,7 @@ export async function probeSshHostKey(target: string, port: number): Promise<str
 export async function startTerminalSession(options: {
   sessionId: string;
   deviceId: string;
+  credentialId?: string;
   protocol: ConnectionProtocol;
   target: string;
   port?: number;
@@ -38,6 +39,7 @@ export async function startTerminalSession(options: {
   await invoke("start_terminal_session", {
     ...options,
     trustedFingerprint: options.trustedFingerprint ?? null,
+    credentialId: options.credentialId ?? null,
     port: options.port ?? null,
     baudRate: options.baudRate ?? null,
     username: options.username ?? "",
@@ -52,9 +54,19 @@ export async function writeTerminal(sessionId: string, data: string): Promise<vo
   await invoke("write_terminal", { sessionId, data });
 }
 
+export async function writeTerminalEnablePassword(sessionId: string, credentialId: string): Promise<void> {
+  if (!isTauri()) throw new Error("Enable passwords are available in the desktop app");
+  await invoke("write_terminal_enable_password", { sessionId, credentialId });
+}
+
 export async function closeTerminal(sessionId: string): Promise<void> {
   if (!isTauri()) return;
   await invoke("close_terminal", { sessionId });
+}
+
+export async function resizeTerminal(sessionId: string, columns: number, rows: number): Promise<void> {
+  if (!isTauri()) return;
+  await invoke("resize_terminal", { sessionId, columns, rows });
 }
 
 export async function listenForTerminalEvents(handler: (event: TerminalEvent) => void): Promise<UnlistenFn> {

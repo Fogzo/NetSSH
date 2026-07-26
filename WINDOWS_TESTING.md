@@ -36,8 +36,9 @@ The two SHA-256 values must match before installation.
 1. Use a non-production Windows 10 or Windows 11 device or VM.
 2. Run the installer as the current user; administrator access should not normally be required.
 3. Windows SmartScreen may show an unknown-publisher warning because this first tester package is unsigned.
-4. Test inventory persistence, credential-vault storage, SSH/Telnet reachability, diagnostics, multiple tabs, split panes, and AI provider configuration.
-5. Remove NetSSH through **Settings → Apps → Installed apps** when testing is complete.
+4. For Wi-Fi diagnostics on current Windows 11 releases, enable **Settings → Privacy & security → Location → Location services** and **Let desktop apps access your location**. NetSSH provides a direct settings button if Windows denies access.
+5. Test inventory persistence, credential-vault storage, SSH/Telnet reachability, diagnostics, multiple tabs, split panes, and AI provider configuration.
+6. Remove NetSSH through **Settings → Apps → Installed apps** when testing is complete.
 
 Only share unsigned packages with a small, trusted tester group through a private channel. Obtain a Windows code-signing certificate before wider or public distribution.
 

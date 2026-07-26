@@ -6,11 +6,13 @@ NetSSH is a modern, network-engineer-first SSH workspace for Windows and macOS, 
 
 - Device-centric multi-tab workspace with split terminals, optional AI side panel, favourites, and connection history
 - Searchable, editable inventory with SSH, Telnet, and Serial connection profiles
+- Password-safe session import/export with NetSSH JSON, CSV, PuTTY, and MobaXterm migration
 - Interactive IPv4 subnet calculator with binary and capacity views
 - Native ping, traceroute, DNS, TCP port, and Wi-Fi health diagnostics
+- Switch-port auditing from timestamped status and packet-counter snapshots
 - Locally stored, searchable, editable command snippets with Cisco IOS/IOS-XE and NX-OS defaults
 - Network-focused AI copilot with OpenAI, Gemini, and offline demo modes
-- Native OS credential storage for provider API keys and device passwords
+- Reusable named login profiles with passwords stored in the native OS credential vault
 - Global command palette (`Cmd/Ctrl + K`)
 - Responsive UI designed to adapt to future tablet and mobile layouts
 - Persistent light, dark, and operating-system appearance modes
@@ -20,7 +22,11 @@ The native desktop app now opens real interactive SSH, Telnet, and Serial sessio
 
 To test a switch, add or edit the device in **Inventory**, select SSH, Telnet, or Serial, and enter the required connection details. Select **Connect** and verify the SSH SHA256 fingerprint against a trusted source the first time. The browser preview cannot create network terminal sessions; use `npm run desktop:dev` or a packaged desktop build. On macOS, Location Services may need to be enabled for network diagnostics before SSID and BSSID are available.
 
-Saved credentials are optional. Telnet and Serial open immediately and allow the device to present its normal login prompts in the terminal. SSH requires a username before the SSH protocol can open a shell, so NetSSH asks for a missing username in a one-time connection dialog instead of forcing an inventory edit. A blank password attempts SSH's passwordless authentication; servers that require authentication cannot present their login prompt inside the shell because the SSH protocol authenticates before opening that shell. Passwords can optionally be saved in the operating-system vault.
+Windows release builds run as normal GUI applications without a separate Command Prompt window. Windows Wi-Fi diagnostics use the language-independent Native Wi-Fi API rather than parsing `netsh`. Current Windows 11 releases may require **Location services** and **Let desktop apps access your location** before SSID, BSSID, and signal details are available; NetSSH shows a direct settings shortcut when access is denied.
+
+Saved credentials are optional. Create labelled profiles such as **Network Admin**, **Read only**, or **Lab TACACS** in **Credentials**, then assign one profile to multiple devices from the vault or device editor. Each profile supports a login password and a separate optional enable password. Passwords remain in the operating-system vault while devices store only the profile ID. From an active session menu, **Send enable password** writes the enable secret directly to the terminal only when the engineer requests it. Telnet and Serial can still present their normal login prompts. SSH requires a username before opening a shell, so unassigned devices use a one-time connection dialog. A blank password attempts passwordless authentication.
+
+Use **Inventory → Import / export** to back up NetSSH connection profiles or migrate sessions from CSV, a PuTTY `.reg` export, a MobaXterm exported sessions file, or `MobaXterm.ini`. Imports create reusable username profiles where possible, but passwords, enable secrets, private keys, macros, proxy commands, and host-key trust are deliberately excluded.
 
 Phase 3 engineer workflows have also started. The workspace supports multiple independent tabs, side-by-side terminal panes, and a compact AI copilot beside a session. Attaching recent terminal context to AI requests is always opt-in.
 
@@ -31,9 +37,9 @@ Phase 3 engineer workflows have also started. The workspace supports multiple in
 3. Keep **NetSSH Demo** selected to test the complete chat workflow offline.
 4. In the native desktop app, choose OpenAI or Gemini and open **Provider settings** to add an API key for integrated context, or launch the provider in a dedicated NetSSH window.
 
-Users who prefer their existing ChatGPT or Gemini subscription can choose **ChatGPT in NetSSH** or **Gemini in NetSSH**. This opens an isolated provider webview window inside the desktop application, where the provider handles sign-in and session storage directly. Web mode does not receive NetSSH terminal context; API mode remains available for integrated, redacted device assistance. Some identity providers may still require the system browser during sign-in because embedded authentication is restricted by their security policy.
+Users who prefer their existing ChatGPT or Gemini subscription can select **ChatGPT Web** or **Gemini Web** directly from the provider dropdown. This embeds an isolated provider webview in both the main AI assistant and the terminal + AI split panel, where the provider handles sign-in and session storage. Web mode does not receive NetSSH terminal context; API mode remains available for integrated, redacted device assistance. Some identity providers may still require the system browser during sign-in because embedded authentication is restricted by their security policy.
 
-Provider credentials and device passwords are only accepted by the native Tauri app and are stored in the operating system credential vault. The browser preview deliberately refuses to save secrets. OpenAI API access is separate from a ChatGPT subscription, and Google Gemini API access is separate from the consumer Gemini application.
+Provider credentials and reusable login-profile passwords are only accepted by the native Tauri app and are stored in the operating system credential vault. The browser preview deliberately refuses to save secrets. OpenAI API access is separate from a ChatGPT subscription, and Google Gemini API access is separate from the consumer Gemini application.
 
 ## Run the interface
 
@@ -66,6 +72,12 @@ npm run desktop:app
 
 The bundle is written to `src-tauri/target/release/bundle/macos/NetSSH.app`. Use `npm run tauri -- build --debug --bundles app` for a faster debug bundle.
 
+The Vite development server includes local Cisco IOS-XE and NX-OS test switches. They open without network access or credentials and support commands such as `show version`, `show ip interface brief`, `show interfaces status`, and `show vlan brief`. The interface-status command includes a Cisco-style `--More--` prompt for testing Space, Enter, scrolling, and terminal formatting.
+
+Terminal productivity controls include Up/Down command history, Tab completion supplied by the remote device, selection copying with `Ctrl+Shift+C` or `Cmd+C`, native paste with `Ctrl+Shift+V` or `Cmd+V`, right-click paste, select-all with `Ctrl+Shift+A` or `Cmd+A`, and visible Copy, Paste, and Clear actions.
+
+The **Toolbox → Switch audit** view identifies disconnected interfaces whose packet counters remain unchanged across a chosen number of weeks. Import periodic CSV snapshots, review protected infrastructure links separately, then copy validation commands or a shutdown-review template. NetSSH never changes switch configuration automatically; a single current interface state is not treated as proof of long-term inactivity.
+
 To package unsigned installers for a trusted testing group, use `npm run package:test:mac` on macOS or `npm run package:test:windows` on Windows. A manual GitHub Actions workflow can build both platforms. See [DISTRIBUTION.md](DISTRIBUTION.md) for artifact locations, tester delivery, signing, and notarization guidance.
 
 For Windows-first testing, use the dedicated **Build Windows tester installer** GitHub Actions workflow and follow [WINDOWS_TESTING.md](WINDOWS_TESTING.md). It produces an NSIS installer with checksum and build metadata on a clean Windows runner.
@@ -89,7 +101,7 @@ The product UI and network calculations stay platform-independent. Native respon
 See [ROADMAP.md](ROADMAP.md) for delivery phases and current status.
 
 1. Native SSH engine — password sessions implemented; key, agent, and jump-host support remain
-2. OS-backed encrypted credential vault and known-host verification — AI keys and device passwords implemented
+2. OS-backed encrypted credential vault and known-host verification — AI keys and reusable device login profiles implemented
 3. SQLite inventory, tags, folders, imports, and backups — persistent device inventory, tags, sites, filters, and duplicate validation implemented; SQLite migration remains
 4. Real terminal emulation, split panes, session logging, and SFTP
 5. Network diagnostics: ping, traceroute, DNS, TCP checks, and packet captures

@@ -5,6 +5,10 @@ use std::time::{Duration, Instant};
 use tokio::net::{lookup_host, TcpStream};
 use tokio::time::timeout;
 
+#[cfg(target_os = "windows")]
+#[path = "windows_wifi.rs"]
+mod windows_wifi;
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DiagnosticResult {
@@ -72,7 +76,7 @@ async fn run_process(
 ) -> Result<DiagnosticResult, String> {
     let started = Instant::now();
     let output = tauri::async_runtime::spawn_blocking(move || {
-        Command::new(program).args(arguments).output()
+        native_command(program).args(arguments).output()
     })
     .await
     .map_err(|error| error.to_string())?
@@ -91,6 +95,20 @@ async fn run_process(
         output: text.trim().to_owned(),
         elapsed_ms: started.elapsed().as_millis(),
     })
+}
+
+#[cfg(target_os = "windows")]
+fn native_command(program: &str) -> Command {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let mut command = Command::new(program);
+    command.creation_flags(CREATE_NO_WINDOW);
+    command
+}
+
+#[cfg(not(target_os = "windows"))]
+fn native_command(program: &str) -> Command {
+    Command::new(program)
 }
 
 #[tauri::command]
@@ -221,19 +239,6 @@ fn integer_values(value: &str) -> Vec<i32> {
         .collect()
 }
 
-#[cfg(target_os = "windows")]
-fn percent_value(value: &str) -> Option<i32> {
-    integer_values(value)
-        .first()
-        .copied()
-        .map(|value| value.clamp(0, 100))
-}
-
-#[cfg(target_os = "windows")]
-fn estimate_rssi(percent: i32) -> i32 {
-    (percent / 2) - 100
-}
-
 fn infer_band(channel: &str) -> Option<String> {
     let lower = channel.to_ascii_lowercase();
     if lower.contains("6ghz") {
@@ -308,66 +313,7 @@ fn wifi_recommendations(result: &WifiDiagnostic) -> Vec<String> {
 
 #[cfg(target_os = "windows")]
 fn collect_wifi_diagnostic() -> Result<WifiDiagnostic, String> {
-    let interfaces = Command::new("netsh")
-        .args(["wlan", "show", "interfaces"])
-        .output()
-        .map_err(|error| format!("Unable to inspect Wi-Fi interfaces: {error}"))?;
-    let interface_text = String::from_utf8_lossy(&interfaces.stdout).into_owned();
-    if !interfaces.status.success() {
-        return Err(String::from_utf8_lossy(&interfaces.stderr)
-            .trim()
-            .to_owned());
-    }
-
-    let mut result = WifiDiagnostic {
-        platform: "Windows",
-        connected: false,
-        interface_name: None,
-        ssid: None,
-        bssid: None,
-        signal_percent: None,
-        rssi_dbm: None,
-        noise_dbm: None,
-        snr_db: None,
-        channel: None,
-        band: None,
-        radio_type: None,
-        tx_rate_mbps: None,
-        rx_rate_mbps: None,
-        security: None,
-        nearby_networks: Vec::new(),
-        recommendations: Vec::new(),
-        raw_output: format!(
-            "{interface_text}\n\nFast link check: nearby-network scanning is skipped to avoid blocking Windows WLAN diagnostics."
-        ),
-        elapsed_ms: 0,
-    };
-    for line in interface_text.lines() {
-        let Some((key, value)) = field_value(line) else {
-            continue;
-        };
-        match key.to_ascii_lowercase().as_str() {
-            "name" => result.interface_name = Some(value.into()),
-            "state" => result.connected = value.eq_ignore_ascii_case("connected"),
-            "ssid" => result.ssid = Some(value.into()),
-            "bssid" => result.bssid = Some(value.into()),
-            "signal" => {
-                result.signal_percent = percent_value(value);
-                result.rssi_dbm = result.signal_percent.map(estimate_rssi);
-            }
-            "channel" => {
-                result.channel = Some(value.into());
-                result.band = infer_band(value);
-            }
-            "radio type" => result.radio_type = Some(value.into()),
-            "transmit rate (mbps)" => result.tx_rate_mbps = integer_values(value).first().copied(),
-            "receive rate (mbps)" => result.rx_rate_mbps = integer_values(value).first().copied(),
-            "authentication" => result.security = Some(value.into()),
-            _ => {}
-        }
-    }
-    result.recommendations = wifi_recommendations(&result);
-    Ok(result)
+    windows_wifi::collect()
 }
 
 #[cfg(target_os = "macos")]
@@ -523,4 +469,18 @@ pub async fn run_wifi_diagnostic() -> Result<WifiDiagnostic, String> {
     .map_err(|error| error.to_string())??;
     result.elapsed_ms = started.elapsed().as_millis();
     Ok(result)
+}
+
+#[tauri::command]
+pub fn open_wifi_privacy_settings() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        native_command("explorer.exe")
+            .arg("ms-settings:privacy-location")
+            .spawn()
+            .map_err(|error| format!("Unable to open Windows Location settings: {error}"))?;
+        return Ok(());
+    }
+    #[cfg(not(target_os = "windows"))]
+    Err("Wi-Fi privacy settings are managed by Windows".into())
 }

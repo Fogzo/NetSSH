@@ -14,10 +14,18 @@ export interface Host {
   favorite?: boolean;
   port?: number;
   username?: string;
+  credentialId?: string;
   tags?: string[];
   notes?: string;
   protocol?: ConnectionProtocol;
   baudRate?: number;
+  demoProfile?: "cisco-iosxe" | "cisco-nxos";
+}
+
+export interface CredentialProfile {
+  id: string;
+  label: string;
+  username: string;
 }
 
 export interface ConnectionHistory {

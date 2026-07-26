@@ -188,6 +188,7 @@ pub async fn start_terminal_session(
     manager: State<'_, TerminalManager>,
     session_id: String,
     device_id: String,
+    credential_id: Option<String>,
     protocol: String,
     target: String,
     port: Option<u16>,
@@ -205,6 +206,11 @@ pub async fn start_terminal_session(
     let username = username.trim().to_owned();
     let password = password
         .filter(|value| !value.is_empty())
+        .or_else(|| {
+            credential_id
+                .as_deref()
+                .and_then(|id| super::credential_entry(id).ok()?.get_password().ok())
+        })
         .or_else(|| super::device_entry(&device_id).ok()?.get_password().ok());
 
     if manager.sessions.lock().await.contains_key(&session_id) {
@@ -245,10 +251,22 @@ pub async fn start_terminal_session(
                     .map_err(|error| format!("SSH authentication failed: {error}"))?
             };
             if !authentication.success() {
+                if password.is_none() {
+                    manager
+                        .sessions
+                        .lock()
+                        .await
+                        .insert(session_id.clone(), sender);
+                    let sessions = manager.sessions.clone();
+                    tokio::spawn(run_ssh_keyboard_interactive_auth(
+                        app, sessions, session_id, handle, receiver, username, columns, rows,
+                    ));
+                    return Ok(());
+                }
                 return Err(if password.is_some() {
                     "SSH authentication was rejected. Check the username and password.".into()
                 } else {
-                    "This SSH server requires authentication before it can open a terminal. Add a password to the device profile or connect again and enter one.".into()
+                    "This SSH server requires a password before it can open a terminal and does not offer keyboard-interactive login. Enter the password in the connection dialog.".into()
                 });
             }
             let channel = handle
@@ -442,6 +460,171 @@ async fn run_ssh_session(
     emit_terminal(&app, &session_id, "closed", "SSH session closed");
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn run_ssh_keyboard_interactive_auth(
+    app: AppHandle,
+    sessions: Arc<Mutex<HashMap<String, mpsc::Sender<TerminalAction>>>>,
+    session_id: String,
+    mut handle: client::Handle<SshHandler>,
+    mut receiver: mpsc::Receiver<TerminalAction>,
+    username: String,
+    columns: u32,
+    rows: u32,
+) {
+    emit_terminal(
+        &app,
+        &session_id,
+        "data",
+        "\r\nSSH keyboard-interactive authentication\r\n",
+    );
+    let mut response = handle
+        .authenticate_keyboard_interactive_start(username, None)
+        .await;
+    loop {
+        match response {
+            Ok(client::KeyboardInteractiveAuthResponse::Success) => break,
+            Ok(client::KeyboardInteractiveAuthResponse::Failure { .. }) => {
+                emit_terminal(
+                    &app,
+                    &session_id,
+                    "error",
+                    "SSH keyboard-interactive authentication was rejected",
+                );
+                sessions.lock().await.remove(&session_id);
+                emit_terminal(&app, &session_id, "closed", "SSH session closed");
+                return;
+            }
+            Ok(client::KeyboardInteractiveAuthResponse::InfoRequest {
+                name,
+                instructions,
+                prompts,
+            }) => {
+                if !name.trim().is_empty() {
+                    emit_terminal(&app, &session_id, "data", format!("{name}\r\n"));
+                }
+                if !instructions.trim().is_empty() {
+                    emit_terminal(&app, &session_id, "data", format!("{instructions}\r\n"));
+                }
+                let mut answers = Vec::with_capacity(prompts.len());
+                for prompt in prompts {
+                    emit_terminal(&app, &session_id, "data", prompt.prompt);
+                    let Some(answer) =
+                        read_auth_line(&app, &session_id, &mut receiver, prompt.echo).await
+                    else {
+                        sessions.lock().await.remove(&session_id);
+                        emit_terminal(&app, &session_id, "closed", "SSH session closed");
+                        return;
+                    };
+                    answers.push(answer);
+                }
+                response = handle
+                    .authenticate_keyboard_interactive_respond(answers)
+                    .await;
+            }
+            Err(error) => {
+                emit_terminal(
+                    &app,
+                    &session_id,
+                    "error",
+                    format!("SSH authentication failed: {error}"),
+                );
+                sessions.lock().await.remove(&session_id);
+                emit_terminal(&app, &session_id, "closed", "SSH session closed");
+                return;
+            }
+        }
+    }
+
+    let channel = match handle.channel_open_session().await {
+        Ok(channel) => channel,
+        Err(error) => {
+            emit_terminal(
+                &app,
+                &session_id,
+                "error",
+                format!("Unable to open the SSH terminal: {error}"),
+            );
+            sessions.lock().await.remove(&session_id);
+            return;
+        }
+    };
+    if let Err(error) = channel
+        .request_pty(
+            false,
+            "xterm-256color",
+            columns.max(20),
+            rows.max(5),
+            0,
+            0,
+            &[],
+        )
+        .await
+    {
+        emit_terminal(
+            &app,
+            &session_id,
+            "error",
+            format!("The SSH server rejected the terminal request: {error}"),
+        );
+        sessions.lock().await.remove(&session_id);
+        return;
+    }
+    if let Err(error) = channel.request_shell(false).await {
+        emit_terminal(
+            &app,
+            &session_id,
+            "error",
+            format!("The SSH server rejected the interactive shell: {error}"),
+        );
+        sessions.lock().await.remove(&session_id);
+        return;
+    }
+    run_ssh_session(app, sessions, session_id, handle, channel, receiver).await;
+}
+
+async fn read_auth_line(
+    app: &AppHandle,
+    session_id: &str,
+    receiver: &mut mpsc::Receiver<TerminalAction>,
+    echo: bool,
+) -> Option<String> {
+    let mut answer = String::new();
+    while let Some(action) = receiver.recv().await {
+        match action {
+            TerminalAction::Data(data) => {
+                for byte in data {
+                    match byte {
+                        b'\r' | b'\n' => {
+                            emit_terminal(app, session_id, "data", "\r\n");
+                            return Some(answer);
+                        }
+                        8 | 127 => {
+                            if answer.pop().is_some() && echo {
+                                emit_terminal(app, session_id, "data", "\x08 \x08");
+                            }
+                        }
+                        32..=126 => {
+                            answer.push(char::from(byte));
+                            if echo {
+                                emit_terminal(
+                                    app,
+                                    session_id,
+                                    "data",
+                                    char::from(byte).to_string(),
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            TerminalAction::Resize { .. } => {}
+            TerminalAction::Close => return None,
+        }
+    }
+    None
+}
+
 async fn run_telnet_session(
     app: AppHandle,
     sessions: Arc<Mutex<HashMap<String, mpsc::Sender<TerminalAction>>>>,
@@ -594,6 +777,28 @@ pub async fn write_terminal(
         .ok_or_else(|| "This terminal session is no longer connected".to_string())?;
     sender
         .send(TerminalAction::Data(data.into_bytes()))
+        .await
+        .map_err(|_| "This terminal session has closed".to_string())
+}
+
+#[tauri::command]
+pub async fn write_terminal_enable_password(
+    manager: State<'_, TerminalManager>,
+    session_id: String,
+    credential_id: String,
+) -> Result<(), String> {
+    let password = super::credential_enable_entry(&credential_id)?
+        .get_password()
+        .map_err(|_| "No enable password is stored for this login profile".to_string())?;
+    let sender = manager
+        .sessions
+        .lock()
+        .await
+        .get(&session_id)
+        .cloned()
+        .ok_or_else(|| "This terminal session is no longer connected".to_string())?;
+    sender
+        .send(TerminalAction::Data(format!("{password}\r\n").into_bytes()))
         .await
         .map_err(|_| "This terminal session has closed".to_string())
 }

@@ -9,6 +9,11 @@ export const hosts: Host[] = [
   { id: "lab-01", name: "LAB-EVE-01", address: "192.168.50.10", platform: "Linux", site: "Network Lab", status: "online", latency: 3 },
 ];
 
+export const ciscoDemoHosts: Host[] = [
+  { id: "demo-cisco-iosxe", name: "DEMO-C9300-01", address: "sandbox-iosxe.local", platform: "Cisco IOS-XE", site: "Test Lab", status: "online", latency: 1, favorite: true, protocol: "ssh", username: "demo", tags: ["demo", "cisco", "switch"], demoProfile: "cisco-iosxe" },
+  { id: "demo-cisco-nxos", name: "DEMO-N9K-01", address: "sandbox-nxos.local", platform: "Cisco NX-OS", site: "Test Lab", status: "online", latency: 1, protocol: "ssh", username: "demo", tags: ["demo", "cisco", "datacenter"], demoProfile: "cisco-nxos" },
+];
+
 export const recentCommands = [
   "show ip interface brief",
   "show bgp summary",

@@ -62,6 +62,11 @@ export async function runWifiDiagnostic(): Promise<WifiDiagnostic> {
   }), 500));
 }
 
+export async function openWifiPrivacySettings(): Promise<void> {
+  if (!isTauri()) throw new Error("Windows Location settings can only be opened from the desktop app.");
+  await invoke("open_wifi_privacy_settings");
+}
+
 export function signalHealth(rssi?: number | null, percent?: number | null) {
   if (rssi != null) {
     if (rssi >= -50) return { label: "Excellent", tone: "excellent", score: 100 };
