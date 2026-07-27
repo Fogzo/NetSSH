@@ -1,76 +1,104 @@
-export interface PortObservation {
+import { invoke } from "@tauri-apps/api/core";
+import { probeSshHostKey } from "./ssh";
+import type { CredentialProfile, Host } from "./types";
+
+export interface LivePortAuditResult {
   port: string;
-  status: string;
-  inputPackets: number;
-  outputPackets: number;
   description: string;
-}
-
-export interface SwitchAuditSnapshot {
-  id: string;
-  deviceId: string;
-  capturedAt: number;
-  ports: PortObservation[];
-}
-
-export interface PortAuditCandidate extends PortObservation {
-  inactiveWeeks: number;
-  packetDelta: number;
+  interfaceStatus: string;
+  lineProtocol: string;
+  lastInput: string;
+  inactiveWeeks: number | null;
   protected: boolean;
+  candidate: boolean;
   reason: string;
 }
 
-const protectedDescription = /(?:uplink|trunk|firewall|router|server|access point|\bap[-_ ]|wireless|wan|port-channel|peer-link)/i;
-const disconnectedStatus = /^(?:notconnect|down|inactive)$/i;
-
-export function parsePortSnapshot(input: string): PortObservation[] {
-  const lines = input.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-  const dataLines = lines[0]?.toLowerCase().startsWith("port,") ? lines.slice(1) : lines;
-  const ports = dataLines.map((line, index) => {
-    const [port, status, inputPackets, outputPackets, ...description] = line.split(",").map((value) => value.trim());
-    const inputCount = Number(inputPackets);
-    const outputCount = Number(outputPackets);
-    if (!port || !status || !Number.isFinite(inputCount) || !Number.isFinite(outputCount)) {
-      throw new Error(`Invalid snapshot row ${index + 1}. Use port,status,inputPackets,outputPackets,description.`);
-    }
-    return { port, status, inputPackets: inputCount, outputPackets: outputCount, description: description.join(", ") };
-  });
-  if (!ports.length) throw new Error("Paste at least one port observation");
-  return ports;
+export interface LiveSwitchAudit {
+  deviceName: string;
+  address: string;
+  checkedAt: number;
+  minimumWeeks: number;
+  elapsedMs: number;
+  ports: LivePortAuditResult[];
+  rawOutput: string;
 }
 
-export function analyzePortSnapshots(snapshots: SwitchAuditSnapshot[], minimumWeeks: number): { candidates: PortAuditCandidate[]; historyWeeks: number; sufficientHistory: boolean } {
-  const ordered = [...snapshots].sort((left, right) => left.capturedAt - right.capturedAt);
-  const latest = ordered.at(-1);
-  if (!latest) return { candidates: [], historyWeeks: 0, sufficientHistory: false };
-  const cutoff = latest.capturedAt - minimumWeeks * 7 * 24 * 60 * 60 * 1000;
-  const baseline = ordered.filter((snapshot) => snapshot.capturedAt <= cutoff).at(-1);
-  const historyWeeks = Math.floor((latest.capturedAt - ordered[0].capturedAt) / (7 * 24 * 60 * 60 * 1000));
-  if (!baseline) return { candidates: [], historyWeeks, sufficientHistory: false };
-  const baselinePorts = new Map(baseline.ports.map((port) => [port.port.toLowerCase(), port]));
-  const candidates = latest.ports.flatMap((port) => {
-    const previous = baselinePorts.get(port.port.toLowerCase());
-    if (!previous || !disconnectedStatus.test(previous.status) || !disconnectedStatus.test(port.status)) return [];
-    const latestPackets = port.inputPackets + port.outputPackets;
-    const previousPackets = previous.inputPackets + previous.outputPackets;
-    if (latestPackets < previousPackets) return [];
-    const packetDelta = latestPackets - previousPackets;
-    if (packetDelta !== 0) return [];
-    const inactiveWeeks = Math.floor((latest.capturedAt - baseline.capturedAt) / (7 * 24 * 60 * 60 * 1000));
-    const protectedPort = protectedDescription.test(port.description);
-    return [{ ...port, inactiveWeeks, packetDelta, protected: protectedPort, reason: protectedPort ? "No traffic, but description suggests infrastructure" : `No packet change and disconnected for at least ${inactiveWeeks} weeks` }];
-  });
-  return { candidates, historyWeeks, sufficientHistory: true };
+const physicalInterface = /^(?:FastEthernet|GigabitEthernet|TenGigabitEthernet|TwentyFiveGigE|FortyGigabitEthernet|HundredGigE|Ethernet|Fa\d|Gi\d|Te\d|Eth\d)/i;
+const protectedDescription = /(?:uplink|trunk|firewall|router|server|access point|\bap[-_ ]|wireless|wan|port-channel|peer-link|stack|vss|vpc)/i;
+
+export function inactivityWeeks(value: string): number | null {
+  const clean = value.trim().toLowerCase();
+  if (!clean) return null;
+  if (clean === "never") return Number.POSITIVE_INFINITY;
+  if (/^\d{1,2}:\d{2}:\d{2}$/.test(clean)) return 0;
+  let days = 0;
+  const years = clean.match(/(\d+)y/);
+  const weeks = clean.match(/(\d+)w/);
+  const dayPart = clean.match(/(\d+)d/);
+  const hours = clean.match(/(\d+)h/);
+  if (years) days += Number(years[1]) * 365;
+  if (weeks) days += Number(weeks[1]) * 7;
+  if (dayPart) days += Number(dayPart[1]);
+  if (hours && days === 0) return 0;
+  return years || weeks || dayPart ? Math.floor(days / 7) : null;
 }
 
-export function ciscoAuditDemoSnapshots(deviceId: string, now = Date.now()): SwitchAuditSnapshot[] {
-  const week = 7 * 24 * 60 * 60 * 1000;
-  const ports = (stage: number): PortObservation[] => [
-    { port: "Gi1/0/1", status: "connected", inputPackets: 180_000 + stage * 25_000, outputPackets: 150_000 + stage * 21_000, description: "USER-DESK-01" },
-    { port: "Gi1/0/3", status: "connected", inputPackets: 900_000 + stage * 90_000, outputPackets: 840_000 + stage * 80_000, description: "AP-LONDON-01" },
-    { port: "Gi1/0/7", status: "notconnect", inputPackets: 1_204, outputPackets: 888, description: "SPARE-DESK" },
-    { port: "Gi1/0/8", status: stage < 2 ? "connected" : "notconnect", inputPackets: stage < 2 ? 8_000 + stage * 500 : 8_500, outputPackets: stage < 2 ? 7_100 + stage * 400 : 7_500, description: "MEETING-ROOM" },
-    { port: "Gi1/0/47", status: "down", inputPackets: 50_000, outputPackets: 51_000, description: "DIST-UPLINK-B" },
-  ];
-  return [16, 12, 8, 4, 0].map((weeksAgo, index) => ({ id: `${deviceId}-${weeksAgo}`, deviceId, capturedAt: now - weeksAgo * week, ports: ports(index) }));
+export function parseCiscoInterfaceAudit(output: string, minimumWeeks: number): LivePortAuditResult[] {
+  const starts = [...output.matchAll(/^([^\s\r\n]+) is ([^,\r\n]+), line protocol is ([^\r\n]+)/gm)];
+  return starts.flatMap((match, index) => {
+    const port = match[1];
+    if (!physicalInterface.test(port)) return [];
+    const start = match.index ?? 0;
+    const end = starts[index + 1]?.index ?? output.length;
+    const block = output.slice(start, end);
+    const description = block.match(/^\s*Description:\s*(.+)$/mi)?.[1]?.trim() ?? "";
+    const lastInput = block.match(/^\s*Last input\s+([^,\s]+)/mi)?.[1] ?? "unknown";
+    const inactiveWeeks = inactivityWeeks(lastInput);
+    const interfaceStatus = match[2].trim();
+    const lineProtocol = match[3].trim();
+    const down = /(?:down|disabled|notconnect)/i.test(interfaceStatus) || /down/i.test(lineProtocol);
+    const oldEnough = inactiveWeeks === Number.POSITIVE_INFINITY || (inactiveWeeks != null && inactiveWeeks >= minimumWeeks);
+    const protectedPort = protectedDescription.test(description);
+    const candidate = down && oldEnough && !protectedPort;
+    const reason = !down ? "Interface is currently active" : !oldEnough ? `Last input is newer than ${minimumWeeks} weeks` : protectedPort ? "Description suggests infrastructure; investigate" : lastInput === "never" ? "No input recorded since the last counter reset/reload" : `No input recorded for approximately ${inactiveWeeks} weeks`;
+    return [{ port, description, interfaceStatus, lineProtocol, lastInput, inactiveWeeks: Number.isFinite(inactiveWeeks) ? inactiveWeeks : null, protected: protectedPort, candidate, reason }];
+  });
+}
+
+export async function runLiveSwitchAudit(host: Host, credential: CredentialProfile, minimumWeeks: number): Promise<LiveSwitchAudit> {
+  const port = host.port ?? 22;
+  const hostKey = await probeSshHostKey(host.address, port);
+  const knownHosts = JSON.parse(localStorage.getItem("netssh.knownHosts") ?? "{}") as Record<string, string>;
+  const knownHostId = `${host.address}:${port}`;
+  const existingFingerprint = knownHosts[knownHostId];
+  if (existingFingerprint !== hostKey.fingerprint) {
+    const message = existingFingerprint
+      ? `WARNING: The SSH host key for ${knownHostId} has changed.\n\nSaved: ${existingFingerprint}\nPresented: ${hostKey.fingerprint}`
+      : `Trust this SSH host key for ${knownHostId}?\n\n${hostKey.fingerprint}`;
+    if (!window.confirm(message)) throw new Error("Switch audit cancelled before trusting the SSH host key");
+    knownHosts[knownHostId] = hostKey.fingerprint;
+    localStorage.setItem("netssh.knownHosts", JSON.stringify(knownHosts));
+  }
+  const result = await invoke<{ output: string; elapsedMs: number }>("collect_switch_interface_data", {
+    deviceId: host.id,
+    credentialId: credential.id,
+    target: host.address,
+    port,
+    username: credential.username,
+    trustedFingerprint: hostKey.fingerprint,
+    legacyRsa: hostKey.legacyRsa,
+  });
+  return { deviceName: host.name, address: host.address, checkedAt: Date.now(), minimumWeeks, elapsedMs: result.elapsedMs, ports: parseCiscoInterfaceAudit(result.output, minimumWeeks), rawOutput: result.output };
+}
+
+function csvValue(value: string | number | null) {
+  const text = value == null ? "" : String(value);
+  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+}
+
+export function createSwitchAuditCsv(audit: LiveSwitchAudit): string {
+  const rows = [["Switch", "Address", "Port", "Description", "Interface status", "Line protocol", "Last input", "Approx. inactive weeks", "Protected", "Recommendation", "Reason"]];
+  audit.ports.forEach((port) => rows.push([audit.deviceName, audit.address, port.port, port.description, port.interfaceStatus, port.lineProtocol, port.lastInput, port.inactiveWeeks == null ? "" : String(port.inactiveWeeks), port.protected ? "Yes" : "No", port.candidate ? "Review for shutdown" : "Keep / investigate", port.reason]));
+  return rows.map((row) => row.map(csvValue).join(",")).join("\r\n");
 }

@@ -16,7 +16,7 @@ import { openWifiPrivacySettings, runWifiDiagnostic, signalHealth, type WifiDiag
 import { closeTerminal, listenForTerminalEvents, preflightConnection, probeSshHostKey, resizeTerminal, startTerminalSession, writeTerminal, writeTerminalEnablePassword } from "./ssh";
 import { deleteCredentialEnablePassword, deleteCredentialPassword, deleteDevicePassword, hasCredentialEnablePassword, hasCredentialPassword, hasDevicePassword, isNativeApp, saveCredentialEnablePassword, saveCredentialPassword } from "./credentials";
 import { readClipboardText, writeClipboardText } from "./clipboard";
-import { analyzePortSnapshots, ciscoAuditDemoSnapshots, parsePortSnapshot, type SwitchAuditSnapshot } from "./switchAudit";
+import { createSwitchAuditCsv, runLiveSwitchAudit, type LiveSwitchAudit } from "./switchAudit";
 import { createNetSshExport, createSessionCsv, decodeSessionFile, parseSessionImport, type ImportedSession, type SessionImportFormat } from "./sessionTransfer";
 import { TopologyDesigner } from "./TopologyDesigner";
 import { fetchSecurityAdvisories, openSecurityAdvisory, securityFeedFallback, type SecurityAdvisory } from "./securityFeed";
@@ -33,14 +33,13 @@ const navItems: { id: View; label: string; icon: typeof TerminalSquare }[] = [
 
 const statusLabel = { online: "Reachable", warning: "Attention", offline: "Offline" };
 type Appearance = "dark" | "light" | "system";
-type AppPreferences = { appearance: Appearance; compactWorkspace: boolean; showConnectionWarnings: boolean; defaultProtocol: ConnectionProtocol; sites: string[]; platforms: string[] };
+type AppPreferences = { appearance: Appearance; compactWorkspace: boolean; showConnectionWarnings: boolean; cliAutocomplete: boolean; defaultProtocol: ConnectionProtocol; sites: string[]; platforms: string[] };
 type UserProfile = { name: string; role: string; onboardingComplete: boolean };
 type AppNotification = { id: string; message: string; createdAt: number; read: boolean };
-type ConnectionCredentialRequest = { host: Host; username: string; requirePassword: boolean; credentialId?: string; credentialLabel?: string };
 type ConnectionCredentials = { username: string; password?: string; savePassword: boolean };
 const defaultPlatforms = ["Cisco IOS-XE", "Cisco NX-OS", "Arista EOS", "Juniper JunOS", "Palo Alto", "Fortinet FortiOS", "Linux", "Other"];
 const defaultSites = [...new Set(initialHosts.map((host) => host.site))].sort();
-const defaultPreferences: AppPreferences = { appearance: "dark", compactWorkspace: false, showConnectionWarnings: true, defaultProtocol: "ssh", sites: defaultSites, platforms: defaultPlatforms };
+const defaultPreferences: AppPreferences = { appearance: "dark", compactWorkspace: false, showConnectionWarnings: true, cliAutocomplete: true, defaultProtocol: "ssh", sites: defaultSites, platforms: defaultPlatforms };
 const defaultUserProfile: UserProfile = { name: "", role: "Network Engineer", onboardingComplete: false };
 
 function profileInitials(name: string) {
@@ -124,8 +123,6 @@ function App() {
   const [sessionTransferOpen, setSessionTransferOpen] = useState(false);
   const [profileEditorOpen, setProfileEditorOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
-  const [connectionCredentialRequest, setConnectionCredentialRequest] = useState<ConnectionCredentialRequest | null>(null);
-  const connectionCredentialResolver = useRef<((credentials: ConnectionCredentials | null) => void) | null>(null);
   const ciscoDemoStates = useRef(new Map<string, CiscoDemoState>());
   const [preferences, setPreferences] = useState<AppPreferences>(() => {
     try { return { ...defaultPreferences, ...JSON.parse(localStorage.getItem("netssh.preferences") ?? "{}") }; }
@@ -200,17 +197,6 @@ function App() {
     return () => query.removeEventListener("change", update);
   }, []);
 
-  const requestConnectionCredentials = (request: ConnectionCredentialRequest) => new Promise<ConnectionCredentials | null>((resolve) => {
-    connectionCredentialResolver.current = resolve;
-    setConnectionCredentialRequest(request);
-  });
-
-  const resolveConnectionCredentials = (credentials: ConnectionCredentials | null) => {
-    connectionCredentialResolver.current?.(credentials);
-    connectionCredentialResolver.current = null;
-    setConnectionCredentialRequest(null);
-  };
-
   const importDeviceSessions = (imported: ImportedSession[], source: string) => {
     const nextProfiles = [...credentialProfiles];
     const nextHosts = [...deviceHosts];
@@ -237,9 +223,50 @@ function App() {
     return { added, duplicates, profiles: nextProfiles.length - credentialProfiles.length };
   };
 
+  const startNativeSession = async (id: string, host: Host, username = "", password?: string): Promise<string | null> => {
+    const protocol = host.protocol ?? "ssh";
+    const assignedCredential = credentialProfiles.find((credential) => credential.id === host.credentialId);
+    const port = protocol === "serial" ? undefined : host.port ?? (protocol === "telnet" ? 23 : 22);
+    setSessions((current) => current.map((session) => session.id === id ? { ...session, connectionState: "connecting", lines: [...session.lines, { kind: "info", text: protocol === "ssh" ? `Preparing SSH connection to ${host.address}:${port}…` : protocol === "serial" ? `Opening ${host.address} at ${host.baudRate ?? 9600} baud…` : `Connecting to ${host.address}:${port} over TELNET…` }] } : session));
+    let trustedFingerprint: string | undefined;
+    let legacyRsa = false;
+    try {
+      if (protocol === "ssh") {
+        const hostKey = await probeSshHostKey(host.address, port ?? 22);
+        const fingerprint = hostKey.fingerprint;
+        legacyRsa = hostKey.legacyRsa;
+        const knownHosts = JSON.parse(localStorage.getItem("netssh.knownHosts") ?? "{}") as Record<string, string>;
+        const knownHostId = `${host.address}:${port ?? 22}`;
+        const existingFingerprint = knownHosts[knownHostId];
+        if (existingFingerprint !== fingerprint) {
+          const warning = existingFingerprint
+            ? `WARNING: The SSH host key for ${knownHostId} has changed.\n\nSaved: ${existingFingerprint}\nPresented: ${fingerprint}\n\nOnly continue if this change is expected.`
+            : `Trust this SSH host key for ${knownHostId}?\n\n${fingerprint}\n\nConfirm this fingerprint with your network administrator before continuing.`;
+          if (!window.confirm(warning)) {
+            setSessions((current) => current.map((session) => session.id === id ? { ...session, connectionState: "closed", lines: [...session.lines, { kind: "warning", text: "Connection cancelled before trusting the SSH host key." }] } : session));
+            return null;
+          }
+          knownHosts[knownHostId] = fingerprint;
+          localStorage.setItem("netssh.knownHosts", JSON.stringify(knownHosts));
+        }
+        trustedFingerprint = fingerprint;
+      }
+      setSessions((current) => current.map((session) => session.id === id ? { ...session, lines: [...session.lines, { kind: "info", text: protocol === "serial" ? `Opening ${host.address} at ${host.baudRate ?? 9600} baud…` : protocol === "telnet" && !username ? `Connected to ${host.address}:${port}; enter credentials when prompted…` : `Authenticating ${username}@${host.address}:${port} over ${protocol.toUpperCase()}…` }, ...(protocol === "telnet" ? [{ kind: "warning" as const, text: "Telnet credentials and session traffic are not encrypted. Use only on a trusted management network." }] : [])] } : session));
+      await startTerminalSession({ sessionId: id, deviceId: host.id, credentialId: assignedCredential?.id, protocol, target: host.address, port, baudRate: host.baudRate, username, password, trustedFingerprint, legacyRsa });
+      setHistory((current) => [{ id: crypto.randomUUID(), deviceId: host.id, deviceName: host.name, protocol, address: host.address, startedAt: Date.now(), success: true, detail: `${protocol.toUpperCase()} session connected` }, ...current].slice(0, 250));
+      return id;
+    } catch (caught) {
+      const detail = String(caught);
+      setSessions((current) => current.map((session) => session.id === id ? { ...session, connected: false, connectionState: "error", lines: [...session.lines, { kind: "warning", text: detail }] } : session));
+      setHistory((current) => [{ id: crypto.randomUUID(), deviceId: host.id, deviceName: host.name, protocol, address: host.address, startedAt: Date.now(), success: false, detail }, ...current].slice(0, 250));
+      notify(detail);
+      return null;
+    }
+  };
+
   const connect = async (host: Host, forceNew = false): Promise<string | null> => {
     const protocol = host.protocol ?? "ssh";
-    const existing = sessions.find((session) => session.host.id === host.id && (session.connected || session.connectionState === "connecting"));
+    const existing = sessions.find((session) => session.host.id === host.id && (session.connected || session.connectionState === "connecting" || session.connectionState === "awaiting-credentials"));
     if (existing && !forceNew) {
       setActiveSession(existing.id);
       setView("workspace");
@@ -256,8 +283,7 @@ function App() {
       }
       if (isNativeApp()) {
         const assignedCredential = credentialProfiles.find((credential) => credential.id === host.credentialId);
-        let connectionUsername = assignedCredential?.username.trim() ?? host.username?.trim() ?? "";
-        let connectionPassword: string | undefined;
+        const connectionUsername = assignedCredential?.username.trim() ?? host.username?.trim() ?? "";
         if (protocol === "ssh") {
           const passwordStored = await Promise.race([
             assignedCredential
@@ -266,62 +292,16 @@ function App() {
             new Promise<false>((resolve) => window.setTimeout(() => resolve(false), 2000)),
           ]);
           if (!connectionUsername || !passwordStored) {
-            const credentials = await requestConnectionCredentials({ host, username: connectionUsername, requirePassword: !passwordStored, credentialId: assignedCredential?.id, credentialLabel: assignedCredential?.label });
-            if (!credentials) return null;
-            connectionUsername = credentials.username.trim();
-            connectionPassword = credentials.password;
-            if (credentials.savePassword && credentials.password && assignedCredential) {
-              try { await saveCredentialPassword(assignedCredential.id, credentials.password); }
-              catch (caught) { notify(`Connected credential could not be saved: ${String(caught)}`); }
-            }
+            setSessions((current) => [...current, { id, host, connected: false, connectionState: "awaiting-credentials", suggestedUsername: connectionUsername, lines: [{ kind: "info", text: `SSH authentication is required before ${host.name} can open a device shell.` }] }]);
+            setActiveSession(id);
+            setView("workspace");
+            return id;
           }
         }
-        const port = protocol === "serial" ? undefined : host.port ?? (protocol === "telnet" ? 23 : 22);
-        setSessions((current) => [...current, {
-          id,
-          host,
-          connected: false,
-          connectionState: "connecting",
-          lines: [{ kind: "info", text: protocol === "ssh" ? `Preparing SSH connection to ${host.address}:${port}…` : protocol === "serial" ? `Opening ${host.address} at ${host.baudRate ?? 9600} baud…` : `Connecting to ${host.address}:${port} over TELNET…` }],
-        }]);
+        setSessions((current) => [...current, { id, host, connected: false, connectionState: "connecting", lines: [] }]);
         setActiveSession(id);
         setView("workspace");
-        let trustedFingerprint: string | undefined;
-        let legacyRsa = false;
-        try {
-          if (protocol === "ssh") {
-            const hostKey = await probeSshHostKey(host.address, port ?? 22);
-            const fingerprint = hostKey.fingerprint;
-            legacyRsa = hostKey.legacyRsa;
-            const knownHosts = JSON.parse(localStorage.getItem("netssh.knownHosts") ?? "{}") as Record<string, string>;
-            const knownHostId = `${host.address}:${port ?? 22}`;
-            const existingFingerprint = knownHosts[knownHostId];
-            if (existingFingerprint !== fingerprint) {
-              const warning = existingFingerprint
-                ? `WARNING: The SSH host key for ${knownHostId} has changed.\n\nSaved: ${existingFingerprint}\nPresented: ${fingerprint}\n\nOnly continue if this change is expected.`
-                : `Trust this SSH host key for ${knownHostId}?\n\n${fingerprint}\n\nConfirm this fingerprint with your network administrator before continuing.`;
-              if (!window.confirm(warning)) return null;
-              knownHosts[knownHostId] = fingerprint;
-              localStorage.setItem("netssh.knownHosts", JSON.stringify(knownHosts));
-            }
-            trustedFingerprint = fingerprint;
-          }
-          appendLines(id, [
-            { kind: "info", text: protocol === "serial" ? `Opening ${host.address} at ${host.baudRate ?? 9600} baud…` : protocol === "telnet" && !connectionUsername ? `Connected to ${host.address}:${port}; enter credentials when prompted…` : `Authenticating ${connectionUsername}@${host.address}:${port} over ${protocol.toUpperCase()}…` },
-            ...(protocol === "telnet" ? [{ kind: "warning" as const, text: "Telnet credentials and session traffic are not encrypted. Use only on a trusted management network." }] : []),
-          ]);
-          await startTerminalSession({ sessionId: id, deviceId: host.id, credentialId: assignedCredential?.id, protocol, target: host.address, port, baudRate: host.baudRate, username: connectionUsername, password: connectionPassword, trustedFingerprint, legacyRsa });
-          setHistory((current) => [{ id: crypto.randomUUID(), deviceId: host.id, deviceName: host.name, protocol, address: host.address, startedAt: Date.now(), success: true, detail: `${protocol.toUpperCase()} session connected` }, ...current].slice(0, 250));
-          return id;
-        } catch (caught) {
-          const detail = String(caught);
-          setSessions((current) => current.map((session) => session.id === id
-            ? { ...session, connected: false, connectionState: "error", lines: [...session.lines, { kind: "warning", text: detail }] }
-            : session));
-          setHistory((current) => [{ id: crypto.randomUUID(), deviceId: host.id, deviceName: host.name, protocol, address: host.address, startedAt: Date.now(), success: false, detail }, ...current].slice(0, 250));
-          notify(detail);
-          return null;
-        }
+        return startNativeSession(id, host, connectionUsername);
       }
       let preflight;
       try {
@@ -347,6 +327,17 @@ function App() {
       setView("workspace");
       return id;
     }
+  };
+
+  const authenticateSession = async (id: string, credentials: ConnectionCredentials) => {
+    const session = sessions.find((item) => item.id === id);
+    if (!session) return;
+    const assignedCredential = credentialProfiles.find((credential) => credential.id === session.host.credentialId);
+    if (credentials.savePassword && credentials.password && assignedCredential) {
+      try { await saveCredentialPassword(assignedCredential.id, credentials.password); }
+      catch (caught) { notify(`Credential could not be saved: ${String(caught)}`); }
+    }
+    await startNativeSession(id, session.host, credentials.username.trim(), credentials.password);
   };
 
   const closeSessions = (ids: string[]) => {
@@ -460,11 +451,11 @@ function App() {
         <Topbar view={view} onSearch={() => setSearchOpen(true)} notifications={notifications} notificationsOpen={notificationsOpen} onToggleNotifications={() => { setNotificationsOpen((open) => !open); setSettingsOpen(false); setNotifications((current) => current.map((item) => ({ ...item, read: true }))); }} onClearNotifications={() => setNotifications([])} onOpenSettings={() => { setSettingsOpen(true); setNotificationsOpen(false); }} />
         <div className="content">
           {view === "workspace" && (
-            <Workspace sessions={sessions} activeId={activeSession} session={currentSession} hosts={deviceHosts} userName={userProfile.name} onActivate={setActiveSession} onClose={closeSession} onCloseMany={closeSessions} onConnect={connect} onNewSession={(host) => connect(host, true)} onCommand={appendLines} onTerminalData={sendTerminalData} onAddDevice={() => setAddDeviceOpen(true)} onShowInventory={() => setView("inventory")} notify={notify} />
+            <Workspace sessions={sessions} activeId={activeSession} session={currentSession} hosts={deviceHosts} userName={userProfile.name} autocompleteEnabled={preferences.cliAutocomplete} onAuthenticate={authenticateSession} onActivate={setActiveSession} onClose={closeSession} onCloseMany={closeSessions} onConnect={connect} onNewSession={(host) => connect(host, true)} onCommand={appendLines} onTerminalData={sendTerminalData} onAddDevice={() => setAddDeviceOpen(true)} onShowInventory={() => setView("inventory")} notify={notify} />
           )}
           {view === "inventory" && <Inventory hosts={deviceHosts} onConnect={connect} onAdd={() => setAddDeviceOpen(true)} onTransfer={() => setSessionTransferOpen(true)} onEdit={setEditingHost} onFavorite={(id) => setDeviceHosts((current) => current.map((host) => host.id === id ? { ...host, favorite: !host.favorite } : host))} onDelete={(id) => { setDeviceHosts((current) => current.filter((host) => host.id !== id)); deleteDevicePassword(id).catch(() => undefined); notify("Device removed"); }} />}
           {view === "topology" && <TopologyDesigner hosts={deviceHosts} onConnect={(host) => { setView("workspace"); void connect(host); }} notify={notify} />}
-          {view === "toolbox" && <Toolbox hosts={deviceHosts} notify={notify} />}
+          {view === "toolbox" && <Toolbox hosts={deviceHosts} credentialProfiles={credentialProfiles} notify={notify} />}
           {view === "snippets" && <Snippets notify={notify} onRun={(snippet) => {
             if (!activeSession) { notify("Open a device session before running a snippet"); setView("workspace"); return; }
             const target = sessions.find((session) => session.id === activeSession);
@@ -496,7 +487,6 @@ function App() {
       {settingsOpen && <SettingsModal preferences={preferences} onClose={() => setSettingsOpen(false)} onSave={(next) => { setPreferences(next); setSettingsOpen(false); notify("Settings saved"); }} />}
       {onboardingOpen && <UserProfileModal profile={userProfile} onboarding onClose={() => setOnboardingOpen(false)} onSave={(profile) => { setUserProfile(profile); setOnboardingOpen(false); notify(`Welcome to NetSSH, ${profile.name.split(" ")[0]}`); }} />}
       {profileEditorOpen && <UserProfileModal profile={userProfile} onClose={() => setProfileEditorOpen(false)} onReset={() => { setUserProfile(defaultUserProfile); setProfileEditorOpen(false); setOnboardingOpen(true); }} onSave={(profile) => { setUserProfile(profile); setProfileEditorOpen(false); notify("Profile updated"); }} />}
-      {connectionCredentialRequest && <ConnectionCredentialsModal request={connectionCredentialRequest} onCancel={() => resolveConnectionCredentials(null)} onConnect={resolveConnectionCredentials} />}
       {sessionTransferOpen && <SessionTransferModal hosts={deviceHosts} credentialProfiles={credentialProfiles} onClose={() => setSessionTransferOpen(false)} onImport={importDeviceSessions} notify={notify} />}
       {toast && <div className="toast"><Check size={16} /> {toast}</div>}
     </div>
@@ -521,7 +511,7 @@ function Sidebar({ view, setView, open, setOpen, onSearch, onOpenSettings, onEdi
       </div>
       <div className="sidebar-footer">
         <div className="sync-card"><div className="sync-icon"><ShieldCheck size={17} /></div><div><strong>Local vault</strong><small>Encrypted & secure</small></div><span className="status-dot" /></div>
-        <div className="profile-wrap">{profileOpen && <div className="profile-menu"><button onClick={() => { setProfileOpen(false); onEditProfile(); }}><UserRound size={14} /><span><strong>Your profile</strong><small>Name and role</small></span></button><button onClick={() => { setProfileOpen(false); onOpenSettings(); }}><Settings size={14} /><span><strong>Preferences</strong><small>Workspace, sites, and platforms</small></span></button><button onClick={() => { setProfileOpen(false); setView("credentials"); }}><KeyRound size={14} /><span><strong>Credential vault</strong><small>Manage reusable logins</small></span></button><button onClick={() => { setProfileOpen(false); onShowOnboarding(); }}><Sparkles size={14} /><span><strong>Welcome tour</strong><small>Review the NetSSH basics</small></span></button><button onClick={() => { setProfileOpen(false); notify("NetSSH 0.1.4 · Local workspace"); }}><Network size={14} /><span><strong>About NetSSH</strong><small>Version 0.1.4</small></span></button></div>}<button className="profile" aria-label="Open profile menu" onClick={() => setProfileOpen((value) => !value)}><span className="avatar">{profileInitials(userProfile.name)}</span><span><strong>{userProfile.name || "Network Engineer"}</strong><small>{userProfile.role || "Local workspace"}</small></span><MoreHorizontal size={18} /></button></div>
+        <div className="profile-wrap">{profileOpen && <div className="profile-menu"><button onClick={() => { setProfileOpen(false); onEditProfile(); }}><UserRound size={14} /><span><strong>Your profile</strong><small>Name and role</small></span></button><button onClick={() => { setProfileOpen(false); onOpenSettings(); }}><Settings size={14} /><span><strong>Preferences</strong><small>Workspace, sites, and platforms</small></span></button><button onClick={() => { setProfileOpen(false); setView("credentials"); }}><KeyRound size={14} /><span><strong>Credential vault</strong><small>Manage reusable logins</small></span></button><button onClick={() => { setProfileOpen(false); onShowOnboarding(); }}><Sparkles size={14} /><span><strong>Welcome tour</strong><small>Review the NetSSH basics</small></span></button><button onClick={() => { setProfileOpen(false); notify("NetSSH 0.1.5 · Local workspace"); }}><Network size={14} /><span><strong>About NetSSH</strong><small>Version 0.1.5</small></span></button></div>}<button className="profile" aria-label="Open profile menu" onClick={() => setProfileOpen((value) => !value)}><span className="avatar">{profileInitials(userProfile.name)}</span><span><strong>{userProfile.name || "Network Engineer"}</strong><small>{userProfile.role || "Local workspace"}</small></span><MoreHorizontal size={18} /></button></div>
       </div>
     </aside>
   );
@@ -566,7 +556,7 @@ function UserProfileModal({ profile, onboarding = false, onClose, onReset, onSav
 
 function SettingsModal({ preferences, onClose, onSave }: { preferences: AppPreferences; onClose: () => void; onSave: (preferences: AppPreferences) => void }) {
   const [draft, setDraft] = useState(preferences);
-  return <div className="modal-backdrop" onMouseDown={onClose}><section className="settings-modal" onMouseDown={(event) => event.stopPropagation()}><div className="provider-modal-head"><div><span><Settings size={18} /></span><div><h3>NetSSH settings</h3><p>Workspace preferences are stored locally on this device.</p></div></div><button onClick={onClose}><X size={17} /></button></div><div className="settings-body"><label className="settings-select"><span><strong>Appearance</strong><small>Choose a light, dark, or operating-system theme</small></span><select value={draft.appearance} onChange={(event) => setDraft({ ...draft, appearance: event.target.value as Appearance })}><option value="dark">Dark</option><option value="light">Light</option><option value="system">Use system setting</option></select></label><label className="settings-select"><span><strong>Default connection protocol</strong><small>Used when creating a new device profile</small></span><select value={draft.defaultProtocol} onChange={(event) => setDraft({ ...draft, defaultProtocol: event.target.value as ConnectionProtocol })}><option value="ssh">SSH</option><option value="telnet">Telnet</option><option value="serial">Serial</option></select></label><label className="settings-toggle"><span><strong>Compact workspace</strong><small>Reduce tab, toolbar, and terminal spacing</small></span><input type="checkbox" checked={draft.compactWorkspace} onChange={(event) => setDraft({ ...draft, compactWorkspace: event.target.checked })} /></label><label className="settings-toggle"><span><strong>Connection safety notices</strong><small>Show authentication and trust limitations in new sessions</small></span><input type="checkbox" checked={draft.showConnectionWarnings} onChange={(event) => setDraft({ ...draft, showConnectionWarnings: event.target.checked })} /></label><ConfigList title="Inventory sites" description="Available when adding or editing a device" items={draft.sites} placeholder="Add a site" onChange={(sites) => setDraft({ ...draft, sites })} /><ConfigList title="Device platforms" description="Vendor and operating-system choices" items={draft.platforms} placeholder="Add a platform" onChange={(platforms) => setDraft({ ...draft, platforms })} /><div className="settings-security"><ShieldCheck size={16} /><span>Credentials remain in the operating system vault. NetSSH does not store passwords in preferences.</span></div></div><div className="modal-actions settings-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" onClick={() => onSave(draft)}>Save settings</button></div></section></div>;
+  return <div className="modal-backdrop" onMouseDown={onClose}><section className="settings-modal" onMouseDown={(event) => event.stopPropagation()}><div className="provider-modal-head"><div><span><Settings size={18} /></span><div><h3>NetSSH settings</h3><p>Workspace preferences are stored locally on this device.</p></div></div><button onClick={onClose}><X size={17} /></button></div><div className="settings-body"><label className="settings-select"><span><strong>Appearance</strong><small>Choose a light, dark, or operating-system theme</small></span><select value={draft.appearance} onChange={(event) => setDraft({ ...draft, appearance: event.target.value as Appearance })}><option value="dark">Dark</option><option value="light">Light</option><option value="system">Use system setting</option></select></label><label className="settings-select"><span><strong>Default connection protocol</strong><small>Used when creating a new device profile</small></span><select value={draft.defaultProtocol} onChange={(event) => setDraft({ ...draft, defaultProtocol: event.target.value as ConnectionProtocol })}><option value="ssh">SSH</option><option value="telnet">Telnet</option><option value="serial">Serial</option></select></label><label className="settings-toggle"><span><strong>Compact workspace</strong><small>Reduce tab, toolbar, and terminal spacing</small></span><input type="checkbox" checked={draft.compactWorkspace} onChange={(event) => setDraft({ ...draft, compactWorkspace: event.target.checked })} /></label><label className="settings-toggle"><span><strong>CLI autocomplete</strong><small>Suggest common network commands while typing in terminals</small></span><input type="checkbox" checked={draft.cliAutocomplete} onChange={(event) => setDraft({ ...draft, cliAutocomplete: event.target.checked })} /></label><label className="settings-toggle"><span><strong>Connection safety notices</strong><small>Show authentication and trust limitations in new sessions</small></span><input type="checkbox" checked={draft.showConnectionWarnings} onChange={(event) => setDraft({ ...draft, showConnectionWarnings: event.target.checked })} /></label><ConfigList title="Inventory sites" description="Available when adding or editing a device" items={draft.sites} placeholder="Add a site" onChange={(sites) => setDraft({ ...draft, sites })} /><ConfigList title="Device platforms" description="Vendor and operating-system choices" items={draft.platforms} placeholder="Add a platform" onChange={(platforms) => setDraft({ ...draft, platforms })} /><div className="settings-security"><ShieldCheck size={16} /><span>Credentials remain in the operating system vault. NetSSH does not store passwords in preferences.</span></div></div><div className="modal-actions settings-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" onClick={() => onSave(draft)}>Save settings</button></div></section></div>;
 }
 
 function ConfigList({ title, description, items, placeholder, onChange }: { title: string; description: string; items: string[]; placeholder: string; onChange: (items: string[]) => void }) {
@@ -579,7 +569,7 @@ function ConfigList({ title, description, items, placeholder, onChange }: { titl
   return <section className="config-list"><div><strong>{title}</strong><small>{description}</small></div><div className="config-chips">{items.map((item) => <span key={item}>{item}<button aria-label={`Remove ${item}`} onClick={() => onChange(items.filter((value) => value !== item))}><X size={11} /></button></span>)}</div><div className="config-add"><input value={value} onChange={(event) => setValue(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); add(); } }} placeholder={placeholder} /><button onClick={add}><Plus size={13} /> Add</button></div></section>;
 }
 
-function Workspace({ sessions, activeId, session, hosts, userName, onActivate, onClose, onCloseMany, onConnect, onNewSession, onCommand, onTerminalData, onAddDevice, onShowInventory, notify }: { sessions: Session[]; activeId: string | null; session?: Session; hosts: Host[]; userName: string; onActivate: (id: string) => void; onClose: (id: string) => void; onCloseMany: (ids: string[]) => void; onConnect: (host: Host) => void; onNewSession: (host: Host) => Promise<string | null>; onCommand: (id: string, lines: TerminalLine[]) => void; onTerminalData: (id: string, data: string) => void; onAddDevice: () => void; onShowInventory: () => void; notify: (message: string) => void }) {
+function Workspace({ sessions, activeId, session, hosts, userName, autocompleteEnabled, onAuthenticate, onActivate, onClose, onCloseMany, onConnect, onNewSession, onCommand, onTerminalData, onAddDevice, onShowInventory, notify }: { sessions: Session[]; activeId: string | null; session?: Session; hosts: Host[]; userName: string; autocompleteEnabled: boolean; onAuthenticate: (id: string, credentials: ConnectionCredentials) => Promise<void>; onActivate: (id: string) => void; onClose: (id: string) => void; onCloseMany: (ids: string[]) => void; onConnect: (host: Host) => void; onNewSession: (host: Host) => Promise<string | null>; onCommand: (id: string, lines: TerminalLine[]) => void; onTerminalData: (id: string, data: string) => void; onAddDevice: () => void; onShowInventory: () => void; notify: (message: string) => void }) {
   const [layout, setLayout] = useState<"single" | "split" | "ai">("single");
   const [primaryId, setPrimaryId] = useState<string | null>(activeId);
   const [secondaryId, setSecondaryId] = useState<string | null>(null);
@@ -657,16 +647,16 @@ function Workspace({ sessions, activeId, session, hosts, userName, onActivate, o
       </div>
       {tabContextMenu && <div className="tab-context-menu" style={{ left: tabContextMenu.x, top: tabContextMenu.y }} onClick={(event) => event.stopPropagation()}><button onClick={() => { onClose(tabContextMenu.id); setTabContextMenu(null); }}><X size={14} /><span>Close tab</span></button><button disabled={sessions.length < 2} onClick={() => { onCloseMany(sessions.filter((item) => item.id !== tabContextMenu.id).map((item) => item.id)); setTabContextMenu(null); }}><Layers3 size={14} /><span>Close other tabs</span></button><div /><button className="menu-danger" onClick={() => { onCloseMany(sessions.map((item) => item.id)); setTabContextMenu(null); }}><Trash2 size={14} /><span>Close all tabs</span></button></div>}
       <div className="terminal-toolbar"><div><CircleDot size={14} /><strong>{primary.host.name}</strong><span>{primary.host.address}</span></div><div><span className="latency"><Activity size={13} /> {primary.host.latency ?? "—"} ms</span><button className={layout === "split" ? "toolbar-active" : ""} aria-label="Toggle split sessions" title="Toggle split sessions" onClick={toggleSplit}><Grid2X2 size={15} /></button><button className={layout === "ai" ? "toolbar-active" : ""} aria-label="Toggle AI side panel" title="Toggle AI side panel" onClick={() => setLayout(layout === "ai" ? "single" : "ai")}><Bot size={15} /></button><div className="session-menu-wrap"><button className={sessionMenuOpen ? "toolbar-active" : ""} aria-label="Session options" onClick={() => { setTabContextMenu(null); setSessionMenuOpen((open) => !open); }}><MoreHorizontal size={16} /></button>{sessionMenuOpen && <div className="session-menu"><button onClick={async () => { setSessionMenuOpen(false); await onNewSession(primary.host); }}><Plus size={14} /><span><strong>Duplicate tab</strong><small>Open another independent session</small></span></button><button onClick={() => { setSessionMenuOpen(false); toggleSplit(); }}><Grid2X2 size={14} /><span><strong>{layout === "split" ? "Close split view" : "Split with session"}</strong><small>{layout === "split" ? "Return to one pane" : "Choose a second device pane"}</small></span></button><button onClick={() => { navigator.clipboard?.writeText(primary.host.address); setSessionMenuOpen(false); notify("Address copied"); }}><Copy size={14} /><span><strong>Copy address</strong><small>{primary.host.address}</small></span></button>{primary.host.credentialId && <button onClick={() => { setSessionMenuOpen(false); writeTerminalEnablePassword(primary.id, primary.host.credentialId!).then(() => notify("Enable password sent securely")).catch((caught) => notify((caught as Error).message)); }}><KeyRound size={14} /><span><strong>Send enable password</strong><small>Use only at the device enable prompt</small></span></button>}<button className="menu-danger" onClick={() => { setSessionMenuOpen(false); onClose(primary.id); }}><Trash2 size={14} /><span><strong>Close session</strong><small>Close this workspace tab</small></span></button><button className="menu-danger" onClick={() => { setSessionMenuOpen(false); onCloseMany(sessions.map((item) => item.id)); }}><Trash2 size={14} /><span><strong>Close all sessions</strong><small>Close every workspace tab</small></span></button></div>}</div></div></div>
-      {layout === "single" && <Terminal session={primary} onData={(data) => onTerminalData(primary.id, data)} />}
-      {layout === "split" && secondary && <div className="workspace-panes"><SessionPane session={primary} sessions={sessions} excludedId={secondary.id} active={focusedPane === primary.id} onSelect={selectPrimary} onActivate={() => setFocusedPane(primary.id)} onData={(data) => onTerminalData(primary.id, data)} /><SessionPane session={secondary} sessions={sessions} excludedId={primary.id} active={focusedPane === secondary.id} onSelect={selectSecondary} onActivate={() => setFocusedPane(secondary.id)} onData={(data) => onTerminalData(secondary.id, data)} /></div>}
-      {layout === "ai" && <div className={`workspace-panes ai-workspace ${aiWebMode ? "web-provider-workspace" : ""}`}><SessionPane session={primary} sessions={sessions} active onSelect={(id) => { setPrimaryId(id); onActivate(id); }} onActivate={() => onActivate(primary.id)} onData={(data) => onTerminalData(primary.id, data)} /><AiSidePanel session={primary} notify={notify} onWebModeChange={setAiWebMode} /></div>}
+      {layout === "single" && <Terminal session={primary} autocompleteEnabled={autocompleteEnabled} onAuthenticate={onAuthenticate} onData={(data) => onTerminalData(primary.id, data)} />}
+      {layout === "split" && secondary && <div className="workspace-panes"><SessionPane session={primary} sessions={sessions} excludedId={secondary.id} active={focusedPane === primary.id} autocompleteEnabled={autocompleteEnabled} onAuthenticate={onAuthenticate} onSelect={selectPrimary} onActivate={() => setFocusedPane(primary.id)} onData={(data) => onTerminalData(primary.id, data)} /><SessionPane session={secondary} sessions={sessions} excludedId={primary.id} active={focusedPane === secondary.id} autocompleteEnabled={autocompleteEnabled} onAuthenticate={onAuthenticate} onSelect={selectSecondary} onActivate={() => setFocusedPane(secondary.id)} onData={(data) => onTerminalData(secondary.id, data)} /></div>}
+      {layout === "ai" && <div className={`workspace-panes ai-workspace ${aiWebMode ? "web-provider-workspace" : ""}`}><SessionPane session={primary} sessions={sessions} active autocompleteEnabled={autocompleteEnabled} onAuthenticate={onAuthenticate} onSelect={(id) => { setPrimaryId(id); onActivate(id); }} onActivate={() => onActivate(primary.id)} onData={(data) => onTerminalData(primary.id, data)} /><AiSidePanel session={primary} notify={notify} onWebModeChange={setAiWebMode} /></div>}
       {pickerMode && <SessionPicker hosts={hosts} title={pickerMode === "split" ? "Open session beside this one" : "Open a new session tab"} onClose={() => setPickerMode(null)} onSelect={selectDevice} onAddDevice={() => { setPickerMode(null); onAddDevice(); }} />}
     </section>
   );
 }
 
-function SessionPane({ session, sessions, excludedId, active, onSelect, onActivate, onData }: { session: Session; sessions: Session[]; excludedId?: string; active: boolean; onSelect: (id: string) => void; onActivate: () => void; onData: (data: string) => void }) {
-  return <section className={`session-pane ${active ? "active" : ""}`} onMouseDown={onActivate}><div className="pane-heading"><span className={`device-state ${session.host.status}`} /><div className="pane-session-select"><select aria-label="Session displayed in this pane" value={session.id} onChange={(event) => { event.stopPropagation(); onSelect(event.target.value); }}>{sessions.map((item) => <option value={item.id} disabled={item.id === excludedId} key={item.id}>{item.host.name} · {item.host.address}</option>)}</select><ChevronDown size={12} /></div><span>{(session.host.protocol ?? "ssh").toUpperCase()}</span></div><Terminal session={session} autoFocus={active} onData={onData} /></section>;
+function SessionPane({ session, sessions, excludedId, active, autocompleteEnabled, onAuthenticate, onSelect, onActivate, onData }: { session: Session; sessions: Session[]; excludedId?: string; active: boolean; autocompleteEnabled: boolean; onAuthenticate: (id: string, credentials: ConnectionCredentials) => Promise<void>; onSelect: (id: string) => void; onActivate: () => void; onData: (data: string) => void }) {
+  return <section className={`session-pane ${active ? "active" : ""}`} onMouseDown={onActivate}><div className="pane-heading"><span className={`device-state ${session.host.status}`} /><div className="pane-session-select"><select aria-label="Session displayed in this pane" value={session.id} onChange={(event) => { event.stopPropagation(); onSelect(event.target.value); }}>{sessions.map((item) => <option value={item.id} disabled={item.id === excludedId} key={item.id}>{item.host.name} · {item.host.address}</option>)}</select><ChevronDown size={12} /></div><span>{(session.host.protocol ?? "ssh").toUpperCase()}</span></div><Terminal session={session} autoFocus={active} autocompleteEnabled={autocompleteEnabled} onAuthenticate={onAuthenticate} onData={onData} /></section>;
 }
 
 function SessionPicker({ hosts, title, onClose, onSelect, onAddDevice }: { hosts: Host[]; title: string; onClose: () => void; onSelect: (host: Host) => void; onAddDevice: () => void }) {
@@ -772,14 +762,81 @@ function Metric({ icon: Icon, value, label, trend, warning }: { icon: typeof Gau
   return <div className="metric"><span className="metric-icon"><Icon size={18} /></span><div><strong>{value}</strong><span>{label}</span></div><em className={warning ? "warning" : ""}>{trend}</em></div>;
 }
 
-function Terminal({ session, onData, autoFocus = true }: { session: Session; onData: (data: string) => void; autoFocus?: boolean }) {
+const cliCommandSuggestions = [
+  "show interfaces status", "show interfaces counters errors", "show ip interface brief", "show vlan brief", "show mac address-table", "show spanning-tree", "show etherchannel summary", "show cdp neighbors detail", "show lldp neighbors detail", "show ip route", "show arp", "show version", "show inventory", "show logging", "show processes cpu sorted", "show environment all", "show power inline", "show port-security interface", "show authentication sessions", "terminal length 0", "configure terminal", "interface", "description", "shutdown", "no shutdown", "copy running-config startup-config",
+];
+
+function cliSuggestionKind(command: string) {
+  if (command.startsWith("show ")) return "show";
+  if (command === "shutdown" || command === "no shutdown" || command.startsWith("copy ")) return "action";
+  return "configure";
+}
+
+function TerminalLogin({ session, onAuthenticate }: { session: Session; onAuthenticate: (id: string, credentials: ConnectionCredentials) => Promise<void> }) {
+  const [username, setUsername] = useState(session.suggestedUsername ?? "");
+  const [password, setPassword] = useState("");
+  const [savePassword, setSavePassword] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const submit = async (event: FormEvent) => {
+    event.preventDefault();
+    if (!username.trim() || submitting) return;
+    setSubmitting(true);
+    await onAuthenticate(session.id, { username: username.trim(), password: password || undefined, savePassword: Boolean(password) && savePassword });
+    setSubmitting(false);
+  };
+  return <div className="terminal terminal-login"><form onSubmit={submit}><div className="terminal-login-brand"><TerminalSquare size={20} /><span><strong>{session.host.name}</strong><small>{session.host.address} · SSH authentication</small></span></div><p>SSH authenticates before the switch can open its command prompt. Enter a username, or assign a saved login to connect automatically next time.</p><label><span>Username</span><input autoFocus value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" /></label><label><span>Password <em>optional</em></span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" placeholder="Leave blank for keyboard-interactive or passwordless login" /></label>{session.host.credentialId && password && <label className="terminal-login-save"><input type="checkbox" checked={savePassword} onChange={(event) => setSavePassword(event.target.checked)} /><span>Save to the assigned credential profile</span></label>}<button className="primary-button" disabled={!username.trim() || submitting}>{submitting ? "Connecting…" : password ? "Connect" : "Try without password"}</button></form><div className="terminal-status disconnected"><span><i /> SSH · Waiting for login</span><span>Credentials stay local</span></div></div>;
+}
+
+function Terminal({ session, onData, onAuthenticate, autocompleteEnabled, autoFocus = true }: { session: Session; onData: (data: string) => void; onAuthenticate: (id: string, credentials: ConnectionCredentials) => Promise<void>; autocompleteEnabled: boolean; autoFocus?: boolean }) {
+  if (session.connectionState === "awaiting-credentials") return <TerminalLogin session={session} onAuthenticate={onAuthenticate} />;
+  return <InteractiveTerminal session={session} onData={onData} autocompleteEnabled={autocompleteEnabled} autoFocus={autoFocus} />;
+}
+
+function InteractiveTerminal({ session, onData, autocompleteEnabled, autoFocus = true }: { session: Session; onData: (data: string) => void; autocompleteEnabled: boolean; autoFocus?: boolean }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<XTerm | null>(null);
   const onDataRef = useRef(onData);
   const connectedRef = useRef(session.connected);
   const renderedLines = useRef(0);
+  const inputBuffer = useRef("");
+  const suggestionRef = useRef<string | null>(null);
+  const suggestionsRef = useRef<string[]>([]);
+  const [suggestions, setSuggestions] = useState<string[]>([]);
+  const [suggestionIndex, setSuggestionIndex] = useState(0);
   onDataRef.current = onData;
   connectedRef.current = session.connected || session.connectionState === "connecting";
+
+  const updateSuggestions = (value: string) => {
+    const clean = value.trimStart().toLowerCase();
+    const matches = autocompleteEnabled && clean.length >= 2 ? cliCommandSuggestions.filter((command) => command.startsWith(clean) && command !== clean).slice(0, 5) : [];
+    suggestionsRef.current = matches;
+    suggestionRef.current = matches[0] ?? null;
+    setSuggestionIndex(0);
+    setSuggestions(matches);
+  };
+
+  const acceptSuggestion = (command: string) => {
+    const leadingWhitespace = inputBuffer.current.match(/^\s*/)?.[0] ?? "";
+    const enteredCommand = inputBuffer.current.slice(leadingWhitespace.length);
+    const suffix = command.slice(enteredCommand.length);
+    if (suffix) onDataRef.current(suffix);
+    inputBuffer.current = `${leadingWhitespace}${command}`;
+    suggestionsRef.current = [];
+    suggestionRef.current = null;
+    setSuggestions([]);
+    terminalRef.current?.focus();
+    requestAnimationFrame(() => terminalRef.current?.focus());
+  };
+
+  const moveSuggestion = (direction: number) => {
+    const availableSuggestions = suggestionsRef.current;
+    if (!availableSuggestions.length) return;
+    setSuggestionIndex((current) => {
+      const next = (current + direction + availableSuggestions.length) % availableSuggestions.length;
+      suggestionRef.current = availableSuggestions[next] ?? null;
+      return next;
+    });
+  };
 
   const writeLine = (terminal: XTerm, line: TerminalLine) => {
     if (line.kind === "output") terminal.write(line.text);
@@ -843,12 +900,39 @@ function Terminal({ session, onData, autoFocus = true }: { session: Session; onD
     const resizeObserver = new ResizeObserver(fit);
     resizeObserver.observe(hostRef.current);
     const dataSubscription = terminal.onData((data) => {
-      if (connectedRef.current) onDataRef.current(data);
+      if (connectedRef.current) {
+        if (autocompleteEnabled) {
+          if (data === "\r" || data === "\n" || data === "\u0003" || data === "\u0015") inputBuffer.current = "";
+          else if (data === "\u007f" || data === "\b") inputBuffer.current = inputBuffer.current.slice(0, -1);
+          else if (!data.startsWith("\u001b") && [...data].every((character) => character >= " ")) inputBuffer.current += data;
+          updateSuggestions(inputBuffer.current);
+        }
+        onDataRef.current(data);
+      }
       else terminal.write("\r\n\x1b[31mThis session is not connected.\x1b[0m\r\n");
     });
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown") return true;
       const key = event.key.toLowerCase();
+      if (autocompleteEnabled && suggestionsRef.current.length && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+        event.preventDefault();
+        event.stopPropagation();
+        moveSuggestion(event.key === "ArrowDown" ? 1 : -1);
+        return false;
+      }
+      if (autocompleteEnabled && (event.key === "Tab" || (event.key === "Enter" && event.ctrlKey)) && suggestionRef.current) {
+        event.preventDefault();
+        event.stopPropagation();
+        acceptSuggestion(suggestionRef.current);
+        return false;
+      }
+      if (autocompleteEnabled && event.key === "Escape" && suggestionsRef.current.length) {
+        event.preventDefault();
+        suggestionsRef.current = [];
+        suggestionRef.current = null;
+        setSuggestions([]);
+        return false;
+      }
       if ((event.metaKey || (event.ctrlKey && event.shiftKey)) && key === "c" && terminal.hasSelection()) {
         void copySelection();
         return false;
@@ -867,7 +951,7 @@ function Terminal({ session, onData, autoFocus = true }: { session: Session; onD
       terminalRef.current = null;
       renderedLines.current = 0;
     };
-  }, [session.id]);
+  }, [session.id, autocompleteEnabled]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
@@ -880,8 +964,11 @@ function Terminal({ session, onData, autoFocus = true }: { session: Session; onD
     if (autoFocus) terminalRef.current?.focus();
   }, [autoFocus]);
 
+  const protocol = session.host.protocol ?? "ssh";
   const stateLabel = session.connectionState === "connecting" ? "Connecting" : session.connected ? "Connected" : session.connectionState === "error" ? "Error" : "Closed";
-  return <div className="terminal"><div className="xterm-host" ref={hostRef} aria-label={`${session.host.name} interactive terminal`} onContextMenu={(event) => { event.preventDefault(); void pasteClipboard(); }} /><div className={`terminal-status ${session.connected ? "connected" : "disconnected"}`}><span><i /> {(session.host.protocol ?? "ssh").toUpperCase()} · {stateLabel}</span><span>xterm-256color</span><span>UTF-8</span><span>{session.host.platform}</span><div className="terminal-actions"><button type="button" onClick={() => void copySelection()} title="Copy selection (Ctrl+Shift+C / Cmd+C)"><Copy size={11} /> Copy</button><button type="button" onClick={() => void pasteClipboard()} title="Paste (Ctrl+Shift+V / Cmd+V)"><ClipboardPaste size={11} /> Paste</button><button type="button" onClick={() => { terminalRef.current?.clear(); terminalRef.current?.focus(); }} title="Clear local scrollback"><Trash2 size={11} /> Clear</button></div></div></div>;
+  const connectionTone = session.connected ? "good" : session.connectionState === "connecting" ? "pending" : "bad";
+  const latencyTone = (session.host.latency ?? 0) > 150 ? "bad" : (session.host.latency ?? 0) > 50 ? "pending" : "good";
+  return <div className="terminal"><div className="terminal-session-info"><span className={`terminal-info-badge ${connectionTone}`}><CircleDot size={11} />{stateLabel}</span><span className={`terminal-info-badge protocol ${protocol}`}><ShieldCheck size={11} />{protocol === "ssh" ? "SSH encrypted" : protocol === "telnet" ? "Telnet unencrypted" : "Local serial"}</span><span className={`terminal-info-badge ${session.host.status === "online" ? "good" : session.host.status === "warning" ? "pending" : "bad"}`}><Router size={11} />{statusLabel[session.host.status]}</span>{session.host.latency != null && <span className={`terminal-info-badge ${latencyTone}`}><Activity size={11} />{session.host.latency} ms</span>}<span className="terminal-info-platform">{session.host.platform}</span></div><div className="xterm-host" ref={hostRef} aria-label={`${session.host.name} interactive terminal`} onContextMenu={(event) => { event.preventDefault(); void pasteClipboard(); }} />{suggestions.length > 0 && <div className="terminal-autocomplete"><div className="terminal-autocomplete-heading"><span><Sparkles size={11} /> Command suggestions</span><small><kbd>↑↓</kbd> navigate <kbd>Tab</kbd> accept <kbd>Esc</kbd> close</small></div>{suggestions.map((command, index) => { const kind = cliSuggestionKind(command); return <button key={command} className={index === suggestionIndex ? `active ${kind}` : kind} onMouseEnter={() => { suggestionRef.current = command; setSuggestionIndex(index); }} onMouseDown={(event) => event.preventDefault()} onClick={() => acceptSuggestion(command)}><Command size={11} /><code>{command}</code><em>{kind === "show" ? "Read only" : kind === "action" ? "Review" : "Configure"}</em></button>; })}</div>}<div className={`terminal-status ${session.connected ? "connected" : "disconnected"}`}><span><i /> {(session.host.protocol ?? "ssh").toUpperCase()} · {stateLabel}</span><span>{autocompleteEnabled ? "Autocomplete on · type 2+ characters" : "Autocomplete off"}</span><span>xterm-256color</span><span>UTF-8</span><div className="terminal-actions"><button type="button" onClick={() => void copySelection()} title="Copy selection (Ctrl+Shift+C / Cmd+C)"><Copy size={11} /> Copy</button><button type="button" onClick={() => void pasteClipboard()} title="Paste (Ctrl+Shift+V / Cmd+V)"><ClipboardPaste size={11} /> Paste</button><button type="button" onClick={() => { terminalRef.current?.clear(); terminalRef.current?.focus(); }} title="Clear local scrollback"><Trash2 size={11} /> Clear</button></div></div></div>;
 }
 
 function Inventory({ hosts, onConnect, onAdd, onTransfer, onEdit, onFavorite, onDelete }: { hosts: Host[]; onConnect: (host: Host) => void; onAdd: () => void; onTransfer: () => void; onEdit: (host: Host) => void; onFavorite: (id: string) => void; onDelete: (id: string) => void }) {
@@ -982,22 +1069,9 @@ function CredentialProfileModal({ profile, onClose, onSave }: { profile?: Creden
   return <div className="modal-backdrop" onMouseDown={onClose}><form className="confirm-modal password-modal credential-profile-modal" onSubmit={submit} onMouseDown={(event) => event.stopPropagation()}><span><KeyRound size={19} /></span><h3>{profile ? `Edit ${profile.label}` : "Create saved login"}</h3><p>The username, login password, and optional privileged-enable password can be reused across assigned devices.</p><label><small>Profile label</small><input autoFocus value={label} onChange={(event) => setLabel(event.target.value)} placeholder="Network Admin" /></label><label><small>Username</small><input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" placeholder="netadmin" /></label><label><small>{profile ? "Replace login password (optional)" : "Login password"}</small><div className="secret-input"><LockKeyhole size={15} /><input type={visible ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" placeholder={profile ? "Leave blank to keep existing" : "Device login password"} /><button type="button" onClick={() => setVisible(!visible)}>{visible ? <EyeOff size={15} /> : <Eye size={15} />}</button></div></label><label><small>{profile ? "Replace enable password (optional)" : "Enable password (optional)"}</small><div className="secret-input"><ShieldCheck size={15} /><input type={enableVisible ? "text" : "password"} value={enablePassword} onChange={(event) => setEnablePassword(event.target.value)} autoComplete="new-password" placeholder={profile ? "Leave blank to keep existing" : "Privileged EXEC secret"} /><button type="button" onClick={() => setEnableVisible(!enableVisible)}>{enableVisible ? <EyeOff size={15} /> : <Eye size={15} />}</button></div></label>{error && <div className="modal-error">{error}</div>}<div className="credential-secret-note"><ShieldCheck size={14} />Enable secrets are sent only when you choose <strong>Send enable password</strong> from an active session menu.</div><div className="password-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={!label.trim() || !username.trim()}>Save login</button></div></form></div>;
 }
 
-function ConnectionCredentialsModal({ request, onCancel, onConnect }: { request: ConnectionCredentialRequest; onCancel: () => void; onConnect: (credentials: ConnectionCredentials) => void }) {
-  const [username, setUsername] = useState(request.username);
-  const [password, setPassword] = useState("");
-  const [visible, setVisible] = useState(false);
-  const [savePassword, setSavePassword] = useState(false);
-  const submit = (event: FormEvent) => {
-    event.preventDefault();
-    if (!username.trim()) return;
-    onConnect({ username: username.trim(), password: password || undefined, savePassword: Boolean(password) && savePassword });
-  };
-  return <div className="modal-backdrop" onMouseDown={onCancel}><form className="confirm-modal connection-credentials-modal" onSubmit={submit} onMouseDown={(event) => event.stopPropagation()}><span><KeyRound size={19} /></span><h3>Connect to {request.host.name}</h3><p>{request.credentialLabel ? `This device uses “${request.credentialLabel}”. Enter its missing password, or continue without one when the SSH server supports it.` : "No saved login is assigned. Enter one-time SSH credentials, or assign a reusable profile from the Credential vault."}</p><label><small>SSH username</small><div className="secret-input"><Router size={15} /><input autoFocus value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" placeholder="Network username" /></div></label>{request.requirePassword && <label><small>SSH password (optional)</small><div className="secret-input"><LockKeyhole size={15} /><input type={visible ? "text" : "password"} value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" placeholder="Leave blank for passwordless authentication" /><button type="button" onClick={() => setVisible(!visible)}>{visible ? <EyeOff size={15} /> : <Eye size={15} />}</button></div></label>}{request.requirePassword && password && request.credentialId && <label className="connection-save"><input type="checkbox" checked={savePassword} onChange={(event) => setSavePassword(event.target.checked)} /><span>Save password to “{request.credentialLabel}”</span></label>}<div className="password-actions"><button type="button" className="secondary-button" onClick={onCancel}>Cancel</button><button className="primary-button" disabled={!username.trim()}>{password ? "Connect" : "Try without password"}</button></div></form></div>;
-}
-
 type ToolboxTool = "subnet" | "ping" | "dns" | "port" | "wifi" | "audit";
 
-function Toolbox({ hosts, notify }: { hosts: Host[]; notify: (message: string) => void }) {
+function Toolbox({ hosts, credentialProfiles, notify }: { hosts: Host[]; credentialProfiles: CredentialProfile[]; notify: (message: string) => void }) {
   const [activeTool, setActiveTool] = useState<ToolboxTool>("subnet");
   const [cidr, setCidr] = useState("10.24.16.34/20");
   const [result, setResult] = useState<SubnetResult>(() => calculateSubnet(cidr));
@@ -1016,51 +1090,44 @@ function Toolbox({ hosts, notify }: { hosts: Host[]; notify: (message: string) =
     { id: "audit" as const, icon: ClipboardCheck, label: "Switch audit" },
   ];
   const toolDescription = (tool: ToolboxTool) => tool === "ping" ? "Reachability and hop path" : tool === "dns" ? "System resolver lookup" : tool === "port" ? "Timed TCP handshake" : tool === "wifi" ? "RSSI, channel and radio health" : tool === "audit" ? "Unused access-port evidence" : "Address planning";
-  return <div className="page"><div className="page-intro"><div><h2>Network toolbox</h2><p>Fast, reliable utilities built into your workflow.</p></div></div><div className="tool-tabs">{tools.map((tool) => <button key={tool.id} className={activeTool === tool.id ? "active" : ""} onClick={() => setActiveTool(tool.id)}><tool.icon size={16} /> {tool.label}</button>)}</div>{activeTool === "subnet" ? <div className="tool-grid"><section className="panel calculator-panel"><div className="panel-title"><div><h3>IPv4 subnet calculator</h3><p>Enter any address using CIDR notation</p></div><span className="tool-icon"><Calculator size={20} /></span></div><form onSubmit={calculate} className="calculator-form"><label>IP address / CIDR</label><div><input value={cidr} onChange={(event) => setCidr(event.target.value)} placeholder="192.168.1.10/24" /><button className="primary-button">Calculate</button></div>{error && <span className="form-error">{error}</span>}</form><div className="result-grid"><Result label="Network" value={result.network} copy={copy} /><Result label="Broadcast" value={result.broadcast} copy={copy} /><Result label="Subnet mask" value={result.mask} copy={copy} /><Result label="Wildcard mask" value={result.wildcard} copy={copy} /><Result label="First usable" value={result.firstHost} copy={copy} /><Result label="Last usable" value={result.lastHost} copy={copy} /></div><div className="capacity-row"><div><span>Address space</span><strong>{result.cidr}</strong></div><div><span>Usable hosts</span><strong>{result.usable.toLocaleString()}</strong></div><div><span>Total addresses</span><strong>{result.total.toLocaleString()}</strong></div><div><span>Scope</span><strong>{result.isPrivate ? "Private" : "Public"}</strong></div></div></section><aside className="tool-aside"><section className="panel"><div className="panel-title"><div><h3>Binary view</h3><p>32-bit representation</p></div></div><div className="binary-value">{result.binary.split(".").map((part, index) => <span key={index}>{part}{index < 3 && <i>.</i>}</span>)}</div></section><section className="panel quick-tools"><div className="panel-title"><div><h3>Quick tools</h3><p>Common network checks</p></div></div>{tools.slice(1).map((tool) => <button key={tool.id} onClick={() => setActiveTool(tool.id)}><span><tool.icon size={17} /></span><div><strong>{tool.label}</strong><small>{toolDescription(tool.id)}</small></div><ChevronRight size={15} /></button>)}</section></aside></div> : activeTool === "wifi" ? <WifiPanel notify={notify} /> : activeTool === "audit" ? <SwitchAuditPanel hosts={hosts} notify={notify} /> : <DiagnosticPanel tool={activeTool} notify={notify} />}</div>;
+  return <div className="page"><div className="page-intro"><div><h2>Network toolbox</h2><p>Fast, reliable utilities built into your workflow.</p></div></div><div className="tool-tabs">{tools.map((tool) => <button key={tool.id} className={activeTool === tool.id ? "active" : ""} onClick={() => setActiveTool(tool.id)}><tool.icon size={16} /> {tool.label}</button>)}</div>{activeTool === "subnet" ? <div className="tool-grid"><section className="panel calculator-panel"><div className="panel-title"><div><h3>IPv4 subnet calculator</h3><p>Enter any address using CIDR notation</p></div><span className="tool-icon"><Calculator size={20} /></span></div><form onSubmit={calculate} className="calculator-form"><label>IP address / CIDR</label><div><input value={cidr} onChange={(event) => setCidr(event.target.value)} placeholder="192.168.1.10/24" /><button className="primary-button">Calculate</button></div>{error && <span className="form-error">{error}</span>}</form><div className="result-grid"><Result label="Network" value={result.network} copy={copy} /><Result label="Broadcast" value={result.broadcast} copy={copy} /><Result label="Subnet mask" value={result.mask} copy={copy} /><Result label="Wildcard mask" value={result.wildcard} copy={copy} /><Result label="First usable" value={result.firstHost} copy={copy} /><Result label="Last usable" value={result.lastHost} copy={copy} /></div><div className="capacity-row"><div><span>Address space</span><strong>{result.cidr}</strong></div><div><span>Usable hosts</span><strong>{result.usable.toLocaleString()}</strong></div><div><span>Total addresses</span><strong>{result.total.toLocaleString()}</strong></div><div><span>Scope</span><strong>{result.isPrivate ? "Private" : "Public"}</strong></div></div></section><aside className="tool-aside"><section className="panel"><div className="panel-title"><div><h3>Binary view</h3><p>32-bit representation</p></div></div><div className="binary-value">{result.binary.split(".").map((part, index) => <span key={index}>{part}{index < 3 && <i>.</i>}</span>)}</div></section><section className="panel quick-tools"><div className="panel-title"><div><h3>Quick tools</h3><p>Common network checks</p></div></div>{tools.slice(1).map((tool) => <button key={tool.id} onClick={() => setActiveTool(tool.id)}><span><tool.icon size={17} /></span><div><strong>{tool.label}</strong><small>{toolDescription(tool.id)}</small></div><ChevronRight size={15} /></button>)}</section></aside></div> : activeTool === "wifi" ? <WifiPanel notify={notify} /> : activeTool === "audit" ? <LiveSwitchAuditPanel hosts={hosts} credentialProfiles={credentialProfiles} notify={notify} /> : <DiagnosticPanel tool={activeTool} notify={notify} />}</div>;
 }
 
-function SwitchAuditPanel({ hosts, notify }: { hosts: Host[]; notify: (message: string) => void }) {
-  const eligibleHosts = hosts.filter((host) => host.protocol !== "serial");
-  const [deviceId, setDeviceId] = useState(eligibleHosts.find((host) => host.demoProfile)?.id ?? eligibleHosts[0]?.id ?? "");
+function LiveSwitchAuditPanel({ hosts, credentialProfiles, notify }: { hosts: Host[]; credentialProfiles: CredentialProfile[]; notify: (message: string) => void }) {
+  const eligibleHosts = hosts.filter((host) => (host.protocol ?? "ssh") === "ssh" && !host.demoProfile);
+  const [deviceId, setDeviceId] = useState(eligibleHosts[0]?.id ?? "");
   const [minimumWeeks, setMinimumWeeks] = useState(10);
-  const [capturedDate, setCapturedDate] = useState(() => new Date().toISOString().slice(0, 10));
-  const [snapshotInput, setSnapshotInput] = useState("port,status,inputPackets,outputPackets,description\nGi1/0/1,connected,125000,118000,USER-DESK\nGi1/0/7,notconnect,1204,888,SPARE-DESK");
+  const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
-  const [confirmClear, setConfirmClear] = useState(false);
-  const [snapshots, setSnapshots] = useState<SwitchAuditSnapshot[]>(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem("netssh.switchAuditSnapshots") ?? "[]") as SwitchAuditSnapshot[];
-      const seededIds = new Set(saved.map((snapshot) => snapshot.deviceId));
-      const demos = hosts.filter((host) => host.demoProfile && !seededIds.has(host.id)).flatMap((host) => ciscoAuditDemoSnapshots(host.id));
-      return [...saved, ...demos];
-    } catch {
-      return hosts.filter((host) => host.demoProfile).flatMap((host) => ciscoAuditDemoSnapshots(host.id));
-    }
-  });
-  useEffect(() => { localStorage.setItem("netssh.switchAuditSnapshots", JSON.stringify(snapshots)); }, [snapshots]);
+  const [audit, setAudit] = useState<LiveSwitchAudit | null>(null);
   const selectedHost = eligibleHosts.find((host) => host.id === deviceId);
-  const deviceSnapshots = snapshots.filter((snapshot) => snapshot.deviceId === deviceId);
-  const audit = useMemo(() => analyzePortSnapshots(deviceSnapshots, minimumWeeks), [deviceSnapshots, minimumWeeks]);
-  const actionable = audit.candidates.filter((candidate) => !candidate.protected);
-  const saveSnapshot = () => {
+  const selectedCredential = credentialProfiles.find((credential) => credential.id === selectedHost?.credentialId);
+  const candidates = audit?.ports.filter((port) => port.candidate) ?? [];
+  const protectedPorts = audit?.ports.filter((port) => port.protected && /down/i.test(`${port.interfaceStatus} ${port.lineProtocol}`)) ?? [];
+  const run = async () => {
+    if (!selectedHost) { setError("Choose an SSH switch from inventory"); return; }
+    if (!selectedCredential) { setError("Assign a saved credential profile to this switch before running an unattended audit"); return; }
+    setRunning(true); setError(""); setAudit(null);
     try {
-      const ports = parsePortSnapshot(snapshotInput);
-      const capturedAt = new Date(`${capturedDate}T12:00:00`).getTime();
-      if (!deviceId || !Number.isFinite(capturedAt)) throw new Error("Choose a switch and capture date");
-      setSnapshots((current) => [...current, { id: crypto.randomUUID(), deviceId, capturedAt, ports }]);
-      setError("");
-      notify(`Saved ${ports.length} port observations for ${selectedHost?.name ?? "switch"}`);
-    } catch (caught) { setError((caught as Error).message); }
+      const result = await runLiveSwitchAudit(selectedHost, selectedCredential, minimumWeeks);
+      setAudit(result);
+      notify(`Checked ${result.ports.length} physical interfaces on ${selectedHost.name}`);
+    } catch (caught) { setError(String(caught)); }
+    finally { setRunning(false); }
   };
-  const copyValidation = () => {
-    const commands = actionable.map((port) => `show interface ${port.port}\nshow logging | include ${port.port}`).join("\n");
-    void writeClipboardText(commands); notify("Validation commands copied");
+  const exportCsv = () => {
+    if (!audit) return;
+    const blobUrl = URL.createObjectURL(new Blob([createSwitchAuditCsv(audit)], { type: "text/csv;charset=utf-8" }));
+    const anchor = document.createElement("a");
+    anchor.href = blobUrl; anchor.download = `${audit.deviceName.replace(/[^a-z0-9]+/gi, "-").toLowerCase()}-port-audit-${new Date(audit.checkedAt).toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(anchor); anchor.click(); anchor.remove(); window.setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
+    notify("Switch audit exported for Excel");
   };
   const copyShutdown = () => {
-    const commands = actionable.map((port) => `interface ${port.port}\n description UNUSED-REVIEW-${new Date().toISOString().slice(0, 10)}\n shutdown\n exit`).join("\n");
-    void writeClipboardText(commands); notify("Shutdown review template copied; verify every port before applying");
+    const commands = candidates.map((port) => `interface ${port.port}\n description UNUSED-REVIEW-${new Date().toISOString().slice(0, 10)}\n shutdown\n exit`).join("\n");
+    void writeClipboardText(commands); notify("Shutdown review template copied; validate every port before applying");
   };
-  return <div className="audit-layout"><section className="panel audit-main"><div className="panel-title"><div><h3>Unused switch-port audit</h3><p>Compare locally stored counter snapshots over a defined period</p></div><span className="tool-icon"><ClipboardCheck size={20} /></span></div><div className="audit-controls"><label><span>Switch</span><select value={deviceId} onChange={(event) => setDeviceId(event.target.value)}>{eligibleHosts.map((host) => <option value={host.id} key={host.id}>{host.name} · {host.site}</option>)}</select></label><label><span>Minimum inactivity</span><div><input type="number" min={1} max={104} value={minimumWeeks} onChange={(event) => setMinimumWeeks(Math.max(1, Number(event.target.value) || 1))} /><em>weeks</em></div></label></div><div className="audit-summary"><article><span>History collected</span><strong>{audit.historyWeeks} weeks</strong></article><article><span>Snapshots</span><strong>{deviceSnapshots.length}</strong></article><article><span>Review candidates</span><strong>{actionable.length}</strong></article><article><span>Protected findings</span><strong>{audit.candidates.length - actionable.length}</strong></article></div>{!audit.sufficientHistory ? <div className="audit-empty"><ClipboardCheck size={25} /><strong>More history is required</strong><span>This switch needs snapshots spanning at least {minimumWeeks} weeks before NetSSH can make an evidence-backed recommendation.</span></div> : audit.candidates.length === 0 ? <div className="audit-empty"><Check size={25} /><strong>No unused-port candidates</strong><span>No disconnected interfaces had unchanged packet counters across the selected period.</span></div> : <div className="audit-results"><div className="audit-result-head"><span>{audit.candidates.length} findings</span><div><button className="secondary-button" disabled={!actionable.length} onClick={copyValidation}>Copy validation commands</button><button className="primary-button" disabled={!actionable.length} onClick={copyShutdown}>Copy shutdown template</button></div></div><div className="audit-table"><div className="audit-row audit-head"><span>Port</span><span>Description</span><span>Status</span><span>Evidence</span><span>Decision</span></div>{audit.candidates.map((port) => <div className="audit-row" key={port.port}><code>{port.port}</code><span>{port.description || "No description"}</span><span className="audit-status">{port.status}</span><span>{port.inactiveWeeks}+ weeks · Δ {port.packetDelta} packets</span><span className={port.protected ? "audit-protected" : "audit-candidate"}>{port.protected ? "Protect / investigate" : "Shutdown candidate"}</span></div>)}</div></div>}<div className="audit-warning"><ShieldCheck size={16} /><span>NetSSH never disables a port automatically. Validate patching, MAC history, PoE devices, phones, access points, monitoring links, and counter resets before changing configuration.</span></div></section><aside className="panel audit-import"><div className="panel-title"><div><h3>Add snapshot</h3><p>Import a read-only observation</p></div></div><label><span>Capture date</span><input type="date" value={capturedDate} onChange={(event) => setCapturedDate(event.target.value)} /></label><label><span>Port data (CSV)</span><textarea rows={10} value={snapshotInput} onChange={(event) => setSnapshotInput(event.target.value)} spellCheck={false} /></label>{error && <div className="diagnostic-error">{error}</div>}<div className="audit-import-actions"><button className="primary-button" onClick={saveSnapshot}>Save snapshot</button><button className="secondary-button" disabled={!deviceSnapshots.length} onClick={() => setConfirmClear(true)}>Clear selected history</button></div><div className="audit-method"><strong>Collection method</strong><span>Record status and packet counters on a schedule. A currently-down port or “last input never” value alone is not enough to prove long-term inactivity.</span><code>port,status,inputPackets,outputPackets,description</code></div></aside>{confirmClear && <ConfirmModal title={`Clear ${selectedHost?.name ?? "switch"} audit history?`} message="This removes all locally stored port snapshots for the selected switch." confirmLabel="Clear audit history" onCancel={() => setConfirmClear(false)} onConfirm={() => { setSnapshots((current) => current.filter((snapshot) => snapshot.deviceId !== deviceId)); setConfirmClear(false); notify("Switch audit history cleared"); }} />}</div>;
+  return <div className="audit-layout live-audit-layout"><section className="panel audit-main"><div className="panel-title"><div><h3>Live unused-port audit</h3><p>Run a read-only interface check directly against a selected Cisco switch</p></div><span className="tool-icon"><ClipboardCheck size={20} /></span></div><div className="audit-controls"><label><span>Switch</span><select value={deviceId} onChange={(event) => { setDeviceId(event.target.value); setAudit(null); setError(""); }}><option value="">Select a switch</option>{eligibleHosts.map((host) => <option value={host.id} key={host.id}>{host.name} · {host.site}</option>)}</select></label><label><span>Unused for at least</span><div><input type="number" min={1} max={104} value={minimumWeeks} onChange={(event) => setMinimumWeeks(Math.max(1, Number(event.target.value) || 1))} /><em>weeks</em></div></label></div><div className="live-audit-run"><span>{selectedCredential ? <><ShieldCheck size={14} /> Uses {selectedCredential.label}</> : <><KeyRound size={14} /> Saved credential required</>}</span><button className="primary-button" onClick={() => void run()} disabled={running || !selectedHost}>{running ? <><Activity className="spin" size={14} /> Checking interfaces…</> : <><Zap size={14} /> Run live audit</>}</button></div>{error && <div className="diagnostic-error">{error}</div>}{audit ? <><div className="audit-summary"><article><span>Physical ports checked</span><strong>{audit.ports.length}</strong></article><article><span>Shutdown candidates</span><strong>{candidates.length}</strong></article><article><span>Protected findings</span><strong>{protectedPorts.length}</strong></article><article><span>Collection time</span><strong>{audit.elapsedMs} ms</strong></article></div><div className="audit-results"><div className="audit-result-head"><span>Checked {new Date(audit.checkedAt).toLocaleString()}</span><div><button className="secondary-button" onClick={exportCsv}><FileDown size={13} /> Export CSV</button><button className="primary-button" disabled={!candidates.length} onClick={copyShutdown}>Copy shutdown template</button></div></div><div className="audit-table"><div className="audit-row audit-head"><span>Port</span><span>Description</span><span>Status</span><span>Last input</span><span>Recommendation</span></div>{audit.ports.map((port) => <div className="audit-row" key={port.port}><code>{port.port}</code><span>{port.description || "No description"}</span><span className="audit-status">{port.interfaceStatus} / {port.lineProtocol}</span><span>{port.lastInput}{port.inactiveWeeks != null ? ` · ~${port.inactiveWeeks} weeks` : ""}</span><span className={port.candidate ? "audit-candidate" : port.protected ? "audit-protected" : ""}>{port.candidate ? "Review for shutdown" : port.reason}</span></div>)}</div></div></> : <div className="audit-empty"><ClipboardCheck size={25} /><strong>Select a switch and run the audit</strong><span>NetSSH runs <code>show interfaces</code>, evaluates each physical port’s last-input age and current state, then prepares an exportable review list.</span></div>}<div className="audit-warning"><ShieldCheck size={16} /><span>“Last input” resets after reloads and may not reflect every traffic type. NetSSH never disables ports automatically. Confirm MAC history, PoE, patching, phones, access points, monitoring and infrastructure links before shutdown.</span></div></section><aside className="panel audit-import live-audit-help"><div className="panel-title"><div><h3>How it works</h3><p>No snapshots or scheduled storage</p></div></div><div className="audit-method"><strong>1 · Connect read-only</strong><span>The assigned credential profile opens a separate SSH command channel.</span><strong>2 · Inspect interfaces</strong><span>Cisco interface state, line protocol, description and last-input age are parsed locally.</span><strong>3 · Review and export</strong><span>Download CSV for Excel, add owner/change details, and validate candidates before making configuration changes.</span></div><div className="audit-method"><strong>Supported in this release</strong><span>Cisco IOS and IOS-XE style <code>show interfaces</code> output. NX-OS and other vendors will be added with vendor-specific collectors.</span></div></aside></div>;
 }
 
 function WifiPanel({ notify }: { notify: (message: string) => void }) {

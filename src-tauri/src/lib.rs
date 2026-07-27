@@ -534,6 +534,7 @@ pub fn run() {
             diagnostics::open_wifi_privacy_settings,
             ssh::connection_preflight,
             ssh::probe_ssh_host_key,
+            ssh::collect_switch_interface_data,
             ssh::start_terminal_session,
             ssh::write_terminal,
             ssh::write_terminal_enable_password,

@@ -50,7 +50,8 @@ export interface Session {
   host: Host;
   lines: TerminalLine[];
   connected: boolean;
-  connectionState?: "connecting" | "connected" | "closed" | "error";
+  connectionState?: "awaiting-credentials" | "connecting" | "connected" | "closed" | "error";
+  suggestedUsername?: string;
 }
 
 export type AiProvider = "openai" | "gemini" | "demo";

@@ -27,6 +27,13 @@ pub struct SshHostKey {
     legacy_rsa: bool,
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SwitchInterfaceOutput {
+    output: String,
+    elapsed_ms: u128,
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TerminalEvent {
@@ -221,6 +228,88 @@ pub async fn probe_ssh_host_key(target: String, port: u16) -> Result<SshHostKey,
     Ok(SshHostKey {
         fingerprint,
         legacy_rsa,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn collect_switch_interface_data(
+    device_id: String,
+    credential_id: Option<String>,
+    target: String,
+    port: u16,
+    username: String,
+    trusted_fingerprint: String,
+    legacy_rsa: bool,
+) -> Result<SwitchInterfaceOutput, String> {
+    let started = Instant::now();
+    let target = validate_target(&target, "ssh")?;
+    let port = validate_port(port)?;
+    let username = username.trim().to_owned();
+    if username.is_empty() {
+        return Err(
+            "Assign a credential profile with a username before running a switch audit".into(),
+        );
+    }
+    let password = credential_id
+        .as_deref()
+        .and_then(|id| super::credential_entry(id).ok()?.get_password().ok())
+        .or_else(|| super::device_entry(&device_id).ok()?.get_password().ok())
+        .ok_or_else(|| {
+            "The selected switch needs a saved login password for unattended auditing".to_string()
+        })?;
+    let observed = Arc::new(std::sync::Mutex::new(None));
+    let handler = SshHandler {
+        expected_fingerprint: Some(trusted_fingerprint),
+        observed_fingerprint: observed,
+    };
+    let mut handle = timeout(
+        Duration::from_secs(10),
+        client::connect(ssh_config(legacy_rsa), (target.as_str(), port), handler),
+    )
+    .await
+    .map_err(|_| format!("SSH connection to {target}:{port} timed out"))?
+    .map_err(|error| format!("SSH connection to {target}:{port} failed: {error}"))?;
+    let authentication = handle
+        .authenticate_password(&username, &password)
+        .await
+        .map_err(|error| format!("SSH authentication failed: {error}"))?;
+    if !authentication.success() {
+        return Err("SSH authentication was rejected for the selected switch".into());
+    }
+    let mut channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|error| format!("Unable to open the audit command channel: {error}"))?;
+    channel
+        .exec(true, "show interfaces")
+        .await
+        .map_err(|error| format!("The switch rejected the read-only audit command: {error}"))?;
+    let output = timeout(Duration::from_secs(25), async {
+        let mut bytes = Vec::new();
+        while let Some(message) = channel.wait().await {
+            match message {
+                russh::ChannelMsg::Data { data } | russh::ChannelMsg::ExtendedData { data, .. } => {
+                    bytes.extend_from_slice(&data)
+                }
+                russh::ChannelMsg::Eof | russh::ChannelMsg::Close => break,
+                _ => {}
+            }
+        }
+        bytes
+    })
+    .await
+    .map_err(|_| "The switch audit command did not finish within 25 seconds".to_string())?;
+    let _ = handle
+        .disconnect(russh::Disconnect::ByApplication, "Audit complete", "en")
+        .await;
+    let output = String::from_utf8_lossy(&output).to_string();
+    if output.trim().is_empty() {
+        return Err("The switch returned no interface data".into());
+    }
+    Ok(SwitchInterfaceOutput {
+        output,
+        elapsed_ms: started.elapsed().as_millis(),
     })
 }
 
