@@ -197,3 +197,16 @@
   .terminal-autocomplete-heading small { display: none; }
   .terminal-info-platform { display: none; }
 }
+
+@media(max-height:700px) {
+  .terminal-session-info { min-height: 29px; padding-block: 3px; }
+  .terminal-info-badge { height: 20px; }
+  .xterm-host { padding-top: 7px; }
+  .terminal-autocomplete { bottom: 27px; }
+}
+
+@media(max-height:520px) {
+  .terminal-session-info { display: none; }
+  .terminal-status { height: 22px; }
+  .xterm-host { padding: 5px 9px 2px; }
+}
