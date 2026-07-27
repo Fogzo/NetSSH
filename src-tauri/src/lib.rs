@@ -3,7 +3,9 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::Duration;
-use tauri::{LogicalPosition, LogicalSize, Manager, WebviewBuilder, WebviewUrl};
+use tauri::Manager;
+#[cfg(all(desktop, not(target_os = "windows")))]
+use tauri::{LogicalPosition, LogicalSize, WebviewBuilder, WebviewUrl};
 
 mod diagnostics;
 mod ssh;
@@ -135,12 +137,12 @@ struct WebviewBounds {
 
 const AI_WEBVIEW_LABEL: &str = "ai-provider-embedded";
 
-#[cfg(desktop)]
+#[cfg(all(desktop, not(target_os = "windows")))]
 fn ai_webview_position_unchecked(bounds: &WebviewBounds) -> LogicalPosition<f64> {
     LogicalPosition::new(bounds.x.max(0.0), bounds.y.max(0.0))
 }
 
-#[cfg(desktop)]
+#[cfg(all(desktop, not(target_os = "windows")))]
 fn ai_webview_position(
     _app: &tauri::AppHandle,
     bounds: &WebviewBounds,
@@ -148,7 +150,7 @@ fn ai_webview_position(
     Ok(ai_webview_position_unchecked(bounds))
 }
 
-#[cfg(desktop)]
+#[cfg(all(desktop, not(target_os = "windows")))]
 fn apply_ai_webview_bounds(
     app: &tauri::AppHandle,
     webview: &tauri::Webview,
@@ -167,7 +169,7 @@ fn apply_ai_webview_bounds(
 }
 
 #[tauri::command]
-#[cfg(desktop)]
+#[cfg(all(desktop, not(target_os = "windows")))]
 fn open_ai_webview(
     app: tauri::AppHandle,
     provider: String,
@@ -200,17 +202,21 @@ fn open_ai_webview(
 }
 
 #[tauri::command]
-#[cfg(not(desktop))]
+#[cfg(any(not(desktop), target_os = "windows"))]
 fn open_ai_webview(
     _app: tauri::AppHandle,
     _provider: String,
-    _bounds: WebviewBounds,
+    bounds: WebviewBounds,
 ) -> Result<(), String> {
-    Err("Embedded provider web chat is currently available on Windows and macOS".into())
+    let _ = (bounds.x, bounds.y, bounds.width, bounds.height);
+    Err(
+        "Embedded provider websites are disabled on Windows to keep terminal sessions responsive"
+            .into(),
+    )
 }
 
 #[tauri::command]
-#[cfg(desktop)]
+#[cfg(all(desktop, not(target_os = "windows")))]
 fn resize_ai_webview(app: tauri::AppHandle, bounds: WebviewBounds) -> Result<(), String> {
     let webview = app
         .get_webview(AI_WEBVIEW_LABEL)
@@ -219,9 +225,13 @@ fn resize_ai_webview(app: tauri::AppHandle, bounds: WebviewBounds) -> Result<(),
 }
 
 #[tauri::command]
-#[cfg(not(desktop))]
-fn resize_ai_webview(_app: tauri::AppHandle, _bounds: WebviewBounds) -> Result<(), String> {
-    Err("Embedded provider web chat is currently available on Windows and macOS".into())
+#[cfg(any(not(desktop), target_os = "windows"))]
+fn resize_ai_webview(_app: tauri::AppHandle, bounds: WebviewBounds) -> Result<(), String> {
+    let _ = (bounds.x, bounds.y, bounds.width, bounds.height);
+    Err(
+        "Embedded provider websites are disabled on Windows to keep terminal sessions responsive"
+            .into(),
+    )
 }
 
 #[tauri::command]
@@ -548,7 +558,7 @@ mod tests {
     }
 
     #[test]
-    #[cfg(desktop)]
+    #[cfg(all(desktop, not(target_os = "windows")))]
     fn child_webview_uses_window_relative_bounds() {
         let bounds = WebviewBounds {
             x: 125.0,

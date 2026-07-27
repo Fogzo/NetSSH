@@ -1,4 +1,5 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import type { AiMessage, AiProvider } from "./types";
 
 export const aiProviders = {
@@ -35,11 +36,28 @@ export async function sendAiMessage(provider: AiProvider, messages: AiMessage[])
 }
 
 export type EmbeddedWebviewBounds = { x: number; y: number; width: number; height: number };
+export type ProviderWebAppMode = "embedded" | "external";
 
-export async function openProviderWebApp(provider: "openai" | "gemini", bounds?: EmbeddedWebviewBounds): Promise<void> {
+let platformRequest: Promise<string> | undefined;
+
+async function nativePlatform(): Promise<string> {
+  if (!isTauri()) return "browser";
+  platformRequest ??= invoke<string>("platform_name").catch(() => "unknown");
+  return platformRequest;
+}
+
+export async function openProviderWebApp(provider: "openai" | "gemini", bounds?: EmbeddedWebviewBounds): Promise<ProviderWebAppMode> {
   const url = provider === "openai" ? "https://chatgpt.com/" : "https://gemini.google.com/app";
-  if (isTauri() && bounds) await invoke("open_ai_webview", { provider, bounds });
-  else window.open(url, "_blank", "noopener,noreferrer");
+  if (isTauri() && await nativePlatform() === "windows") {
+    await openUrl(url);
+    return "external";
+  }
+  if (isTauri() && bounds) {
+    await invoke("open_ai_webview", { provider, bounds });
+    return "embedded";
+  }
+  window.open(url, "_blank", "noopener,noreferrer");
+  return "external";
 }
 
 export async function resizeProviderWebApp(bounds: EmbeddedWebviewBounds): Promise<void> {

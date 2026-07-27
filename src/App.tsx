@@ -521,7 +521,7 @@ function Sidebar({ view, setView, open, setOpen, onSearch, onOpenSettings, onEdi
       </div>
       <div className="sidebar-footer">
         <div className="sync-card"><div className="sync-icon"><ShieldCheck size={17} /></div><div><strong>Local vault</strong><small>Encrypted & secure</small></div><span className="status-dot" /></div>
-        <div className="profile-wrap">{profileOpen && <div className="profile-menu"><button onClick={() => { setProfileOpen(false); onEditProfile(); }}><UserRound size={14} /><span><strong>Your profile</strong><small>Name and role</small></span></button><button onClick={() => { setProfileOpen(false); onOpenSettings(); }}><Settings size={14} /><span><strong>Preferences</strong><small>Workspace, sites, and platforms</small></span></button><button onClick={() => { setProfileOpen(false); setView("credentials"); }}><KeyRound size={14} /><span><strong>Credential vault</strong><small>Manage reusable logins</small></span></button><button onClick={() => { setProfileOpen(false); onShowOnboarding(); }}><Sparkles size={14} /><span><strong>Welcome tour</strong><small>Review the NetSSH basics</small></span></button><button onClick={() => { setProfileOpen(false); notify("NetSSH 0.1.3 · Local workspace"); }}><Network size={14} /><span><strong>About NetSSH</strong><small>Version 0.1.3</small></span></button></div>}<button className="profile" aria-label="Open profile menu" onClick={() => setProfileOpen((value) => !value)}><span className="avatar">{profileInitials(userProfile.name)}</span><span><strong>{userProfile.name || "Network Engineer"}</strong><small>{userProfile.role || "Local workspace"}</small></span><MoreHorizontal size={18} /></button></div>
+        <div className="profile-wrap">{profileOpen && <div className="profile-menu"><button onClick={() => { setProfileOpen(false); onEditProfile(); }}><UserRound size={14} /><span><strong>Your profile</strong><small>Name and role</small></span></button><button onClick={() => { setProfileOpen(false); onOpenSettings(); }}><Settings size={14} /><span><strong>Preferences</strong><small>Workspace, sites, and platforms</small></span></button><button onClick={() => { setProfileOpen(false); setView("credentials"); }}><KeyRound size={14} /><span><strong>Credential vault</strong><small>Manage reusable logins</small></span></button><button onClick={() => { setProfileOpen(false); onShowOnboarding(); }}><Sparkles size={14} /><span><strong>Welcome tour</strong><small>Review the NetSSH basics</small></span></button><button onClick={() => { setProfileOpen(false); notify("NetSSH 0.1.4 · Local workspace"); }}><Network size={14} /><span><strong>About NetSSH</strong><small>Version 0.1.4</small></span></button></div>}<button className="profile" aria-label="Open profile menu" onClick={() => setProfileOpen((value) => !value)}><span className="avatar">{profileInitials(userProfile.name)}</span><span><strong>{userProfile.name || "Network Engineer"}</strong><small>{userProfile.role || "Local workspace"}</small></span><MoreHorizontal size={18} /></button></div>
       </div>
     </aside>
   );
@@ -718,7 +718,7 @@ function AiSidePanel({ session, notify, onWebModeChange }: { session: Session; n
     setWebProvider(null);
     setProvider(value as AiProvider);
   };
-  return <aside className="workspace-ai"><div className="workspace-ai-head"><div><span><BrainCircuit size={16} /></span><div><strong>Network copilot</strong><small>Beside {session.host.name}</small></div></div><div className="provider-select"><span className="provider-dot" style={{ background: aiProviders[webProvider ?? provider].accent }} /><select value={webProvider ? `${webProvider}-web` : provider} onChange={(event) => selectProvider(event.target.value)} aria-label="Side panel AI provider"><option value="demo">Demo</option><option value="openai">OpenAI API</option><option value="gemini">Gemini API</option><option value="openai-web">ChatGPT Web</option><option value="gemini-web">Gemini Web</option></select><ChevronDown size={13} /></div></div>{webProvider ? <EmbeddedProviderView provider={webProvider} notify={notify} compact /> : <><div className="workspace-ai-notice"><ShieldCheck size={13} />Session output is excluded unless you enable context.</div><div className="side-chat-scroll">{messages.map((message) => <ChatMessage key={message.id} message={message} provider={provider} />)}{sending && <div className="chat-message assistant-message"><span className="message-avatar"><Bot size={15} /></span><div className="message-bubble typing"><i /><i /><i /></div></div>}<div ref={bottomRef} /></div><form className="side-composer" onSubmit={submit}><textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Ask about this session…" rows={3} /><label><input type="checkbox" checked={attachContext} onChange={(event) => setAttachContext(event.target.checked)} /><span><Layers3 size={12} /> Include recent session context</span></label><button className="primary-button" disabled={!draft.trim() || sending}><Send size={14} /> Send</button></form></>}</aside>;
+  return <aside className="workspace-ai"><div className="workspace-ai-head"><div><span><BrainCircuit size={16} /></span><div><strong>Network copilot</strong><small>Beside {session.host.name}</small></div></div><div className="provider-select"><span className="provider-dot" style={{ background: aiProviders[webProvider ?? provider].accent }} /><select value={webProvider ? `${webProvider}-web` : provider} onChange={(event) => selectProvider(event.target.value)} aria-label="Side panel AI provider"><option value="demo">Demo</option><option value="openai">OpenAI API</option><option value="gemini">Gemini API</option><option value="openai-web">ChatGPT Web</option><option value="gemini-web">Gemini Web</option></select><ChevronDown size={13} /></div></div>{webProvider ? <EmbeddedProviderView provider={webProvider} notify={notify} compact onExternal={() => setWebProvider(null)} /> : <><div className="workspace-ai-notice"><ShieldCheck size={13} />Session output is excluded unless you enable context.</div><div className="side-chat-scroll">{messages.map((message) => <ChatMessage key={message.id} message={message} provider={provider} />)}{sending && <div className="chat-message assistant-message"><span className="message-avatar"><Bot size={15} /></span><div className="message-bubble typing"><i /><i /><i /></div></div>}<div ref={bottomRef} /></div><form className="side-composer" onSubmit={submit}><textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Ask about this session…" rows={3} /><label><input type="checkbox" checked={attachContext} onChange={(event) => setAttachContext(event.target.checked)} /><span><Layers3 size={12} /> Include recent session context</span></label><button className="primary-button" disabled={!draft.trim() || sending}><Send size={14} /> Send</button></form></>}</aside>;
 }
 
 function WorkspaceHome({ hosts, userName, onConnect, onAddDevice, onShowInventory }: { hosts: Host[]; userName: string; onConnect: (host: Host) => void; onAddDevice: () => void; onShowInventory: () => void }) {
@@ -1282,7 +1282,7 @@ function AiAssistant({ notify }: { notify: (message: string) => void }) {
           <ChevronDown size={14} />
         </div>{webProvider && <button type="button" className="web-provider-close" onClick={() => setWebProvider(null)} aria-label="Close embedded web chat" title="Close web chat"><X size={15} /><span>Close</span></button>}</div>
       </div>
-      {webProvider ? <EmbeddedProviderView provider={webProvider} notify={notify} /> : <><div className="assistant-notice"><ShieldCheck size={14} /><span>AI suggestions can be wrong. Review commands and configuration changes before applying them.</span></div>
+      {webProvider ? <EmbeddedProviderView provider={webProvider} notify={notify} onExternal={() => setWebProvider(null)} /> : <><div className="assistant-notice"><ShieldCheck size={14} /><span>AI suggestions can be wrong. Review commands and configuration changes before applying them.</span></div>
       <div className="chat-scroll">
         <div className="message-list">
           {messages.map((message) => <ChatMessage key={message.id} message={message} provider={provider} />)}
@@ -1301,35 +1301,48 @@ function AiAssistant({ notify }: { notify: (message: string) => void }) {
     <aside className="assistant-context">
       <section><div className="context-heading"><span><Layers3 size={16} /></span><div><strong>Session context</strong><small>Optional context sent with chat</small></div></div><button className="context-empty"><TerminalSquare size={18} /><span><strong>No session attached</strong><small>Attach terminal output for analysis</small></span><Plus size={14} /></button></section>
       <section><div className="context-heading"><span><ShieldCheck size={16} /></span><div><strong>Privacy controls</strong><small>Review before sending</small></div></div><label className="privacy-row"><span>Redact IP addresses</span><input type="checkbox" /></label><label className="privacy-row"><span>Remove possible secrets</span><input type="checkbox" defaultChecked /></label></section>
-      <section className="provider-card"><div className="context-heading"><span><Bot size={16} /></span><div><strong>{aiProviders[provider].name}</strong><small>{aiProviders[provider].model}</small></div></div><button onClick={() => { setWebProvider(null); setSettingsOpen(true); }}><Settings size={14} /> API provider settings</button><div className="web-chat-divider"><span>or use your existing login</span></div><button onClick={() => openWebProvider("openai")}><Globe2 size={14} /> ChatGPT inside this page</button><button onClick={() => openWebProvider("gemini")}><Globe2 size={14} /> Gemini inside this page</button></section>
+      <section className="provider-card"><div className="context-heading"><span><Bot size={16} /></span><div><strong>{aiProviders[provider].name}</strong><small>{aiProviders[provider].model}</small></div></div><button onClick={() => { setWebProvider(null); setSettingsOpen(true); }}><Settings size={14} /> API provider settings</button><div className="web-chat-divider"><span>or use your existing login</span></div><button onClick={() => openWebProvider("openai")}><Globe2 size={14} /> Open ChatGPT Web</button><button onClick={() => openWebProvider("gemini")}><Globe2 size={14} /> Open Gemini Web</button></section>
     </aside>
     {settingsOpen && <ProviderSettings connected={connected} setConnected={setConnected} onOpenWeb={openWebProvider} onClose={() => setSettingsOpen(false)} notify={notify} />}
   </div>;
 }
 
-function EmbeddedProviderView({ provider, notify, compact = false }: { provider: "openai" | "gemini"; notify: (message: string) => void; compact?: boolean }) {
+function EmbeddedProviderView({ provider, notify, compact = false, onExternal }: { provider: "openai" | "gemini"; notify: (message: string) => void; compact?: boolean; onExternal?: () => void }) {
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const notifyRef = useRef(notify);
+  const onExternalRef = useRef(onExternal);
+  notifyRef.current = notify;
+  onExternalRef.current = onExternal;
 
   useEffect(() => {
     const surface = surfaceRef.current;
     if (!surface) return;
     let opened = false;
+    let opening = false;
     let stopped = false;
     const bounds = () => {
       const rect = surface.getBoundingClientRect();
       return { x: rect.left, y: rect.top, width: rect.width, height: rect.height };
     };
     const sync = async () => {
-      if (stopped || surface.clientWidth < 1 || surface.clientHeight < 1) return;
+      if (stopped || opening || surface.clientWidth < 1 || surface.clientHeight < 1) return;
       try {
         if (!opened) {
-          await openProviderWebApp(provider, bounds());
+          opening = true;
+          const mode = await openProviderWebApp(provider, bounds());
+          if (mode === "external") {
+            notifyRef.current(`${provider === "openai" ? "ChatGPT" : "Gemini"} opened in your browser. Embedded provider websites are disabled on Windows to keep terminals responsive.`);
+            onExternalRef.current?.();
+            return;
+          }
           opened = true;
         } else {
           await resizeProviderWebApp(bounds());
         }
       } catch (caught) {
-        if (!stopped) notify(`Unable to embed ${provider === "openai" ? "ChatGPT" : "Gemini"}: ${String(caught)}`);
+        if (!stopped) notifyRef.current(`Unable to embed ${provider === "openai" ? "ChatGPT" : "Gemini"}: ${String(caught)}`);
+      } finally {
+        opening = false;
       }
     };
     const observer = new ResizeObserver(() => { void sync(); });
@@ -1342,7 +1355,7 @@ function EmbeddedProviderView({ provider, notify, compact = false }: { provider:
       window.removeEventListener("resize", sync);
       void closeProviderWebApp();
     };
-  }, [provider, notify]);
+  }, [provider]);
 
   return <section className={`embedded-provider ${compact ? "compact" : ""}`}>{compact && <div className="embedded-provider-guard"><ShieldCheck size={13} /><span>Isolated provider web session</span></div>}<div className="embedded-provider-surface" ref={surfaceRef}><RefreshCw className="spin" size={20} /><span>Loading secure provider view…</span></div></section>;
 }
