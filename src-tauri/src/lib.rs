@@ -98,12 +98,15 @@ async fn fetch_security_feed(client: &Client, vendor: &str, url: &str) -> Vec<Se
 #[tauri::command]
 async fn fetch_security_advisories() -> Result<Vec<SecurityAdvisory>, String> {
     let client = Client::builder()
-        .timeout(Duration::from_secs(8))
+        .connect_timeout(Duration::from_secs(3))
+        .timeout(Duration::from_secs(5))
         .user_agent("NetSSH/0.1 security-feed")
         .build()
         .map_err(|error| error.to_string())?;
-    let cisco = fetch_security_feed(&client, "Cisco", CISCO_SECURITY_RSS).await;
-    let fortinet = fetch_security_feed(&client, "Fortinet", FORTINET_SECURITY_RSS).await;
+    let (cisco, fortinet) = tokio::join!(
+        fetch_security_feed(&client, "Cisco", CISCO_SECURITY_RSS),
+        fetch_security_feed(&client, "Fortinet", FORTINET_SECURITY_RSS)
+    );
     let mut advisories = Vec::new();
     for index in 0..4 {
         if let Some(advisory) = cisco.get(index) {
@@ -133,25 +136,16 @@ struct WebviewBounds {
 const AI_WEBVIEW_LABEL: &str = "ai-provider-embedded";
 
 #[cfg(desktop)]
+fn ai_webview_position_unchecked(bounds: &WebviewBounds) -> LogicalPosition<f64> {
+    LogicalPosition::new(bounds.x.max(0.0), bounds.y.max(0.0))
+}
+
+#[cfg(desktop)]
 fn ai_webview_position(
-    app: &tauri::AppHandle,
+    _app: &tauri::AppHandle,
     bounds: &WebviewBounds,
 ) -> Result<LogicalPosition<f64>, String> {
-    let main_webview = app
-        .get_webview("main")
-        .ok_or_else(|| "The main NetSSH webview is unavailable".to_string())?;
-    let scale_factor = main_webview
-        .window()
-        .scale_factor()
-        .map_err(|error| error.to_string())?;
-    let origin = main_webview
-        .position()
-        .map_err(|error| error.to_string())?
-        .to_logical::<f64>(scale_factor);
-    Ok(LogicalPosition::new(
-        origin.x + bounds.x,
-        origin.y + bounds.y,
-    ))
+    Ok(ai_webview_position_unchecked(bounds))
 }
 
 #[cfg(desktop)]
@@ -493,6 +487,16 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .manage(ssh::TerminalManager::default())
+        .on_window_event(|window, event| {
+            if window.label() == "main"
+                && matches!(event, tauri::WindowEvent::CloseRequested { .. })
+            {
+                if let Some(webview) = window.app_handle().get_webview(AI_WEBVIEW_LABEL) {
+                    let _ = webview.close();
+                }
+                window.app_handle().exit(0);
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             platform_name,
             open_ai_webview,
@@ -528,4 +532,32 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running NetSSH");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_security_feed_items_without_network_access() {
+        let xml = r#"<rss><channel><item><title><![CDATA[Critical Cisco update]]></title><link>https://example.test/advisory</link><pubDate>Sun, 26 Jul 2026</pubDate></item></channel></rss>"#;
+        let advisories = parse_security_rss(xml, "Cisco");
+        assert_eq!(advisories.len(), 1);
+        assert_eq!(advisories[0].title, "Critical Cisco update");
+        assert_eq!(advisories[0].severity, "Critical");
+    }
+
+    #[test]
+    #[cfg(desktop)]
+    fn child_webview_uses_window_relative_bounds() {
+        let bounds = WebviewBounds {
+            x: 125.0,
+            y: 80.0,
+            width: 640.0,
+            height: 480.0,
+        };
+        let position = ai_webview_position_unchecked(&bounds);
+        assert_eq!(position.x, 125.0);
+        assert_eq!(position.y, 80.0);
+    }
 }

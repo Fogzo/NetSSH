@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 import type { ConnectionProtocol } from "./types";
@@ -9,17 +9,14 @@ export interface ConnectionPreflightResult {
   elapsedMs: number;
 }
 
-const isTauri = () => "__TAURI_INTERNALS__" in window;
-
 export interface TerminalEvent {
   sessionId: string;
   kind: "connected" | "data" | "info" | "error" | "closed";
   data: string;
 }
 
-export async function probeSshHostKey(target: string, port: number): Promise<string> {
-  const result = await invoke<{ fingerprint: string }>("probe_ssh_host_key", { target, port });
-  return result.fingerprint;
+export async function probeSshHostKey(target: string, port: number): Promise<{ fingerprint: string; legacyRsa: boolean }> {
+  return invoke<{ fingerprint: string; legacyRsa: boolean }>("probe_ssh_host_key", { target, port });
 }
 
 export async function startTerminalSession(options: {
@@ -33,12 +30,14 @@ export async function startTerminalSession(options: {
   username?: string;
   password?: string;
   trustedFingerprint?: string;
+  legacyRsa?: boolean;
   columns?: number;
   rows?: number;
 }): Promise<void> {
   await invoke("start_terminal_session", {
     ...options,
     trustedFingerprint: options.trustedFingerprint ?? null,
+    legacyRsa: options.legacyRsa ?? false,
     credentialId: options.credentialId ?? null,
     port: options.port ?? null,
     baudRate: options.baudRate ?? null,

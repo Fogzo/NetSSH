@@ -1,6 +1,6 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 
-export const isNativeApp = () => "__TAURI_INTERNALS__" in window;
+export const isNativeApp = isTauri;
 
 export async function saveCredentialPassword(credentialId: string, password: string): Promise<void> {
   if (!isNativeApp()) throw new Error("Password storage is available in the native NetSSH app.");

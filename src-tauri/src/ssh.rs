@@ -1,6 +1,7 @@
 use russh::client;
-use russh::keys::ssh_key::PublicKey;
+use russh::keys::ssh_key::{Algorithm, PublicKey};
 use serde::Serialize;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
 use std::sync::Arc;
@@ -23,6 +24,7 @@ pub struct ConnectionPreflightResult {
 #[serde(rename_all = "camelCase")]
 pub struct SshHostKey {
     fingerprint: String,
+    legacy_rsa: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -104,9 +106,23 @@ fn emit_terminal(app: &AppHandle, session_id: &str, kind: &'static str, data: im
     );
 }
 
-fn ssh_config() -> Arc<client::Config> {
+fn ssh_config(legacy_rsa: bool) -> Arc<client::Config> {
+    let mut preferred = russh::Preferred::default();
+    if legacy_rsa {
+        let mut keys = preferred.key.to_vec();
+        if let Some(index) = keys
+            .iter()
+            .position(|algorithm| matches!(algorithm, Algorithm::Rsa { hash: None }))
+        {
+            let legacy = keys.remove(index);
+            keys.insert(0, legacy);
+            preferred.key = Cow::Owned(keys);
+        }
+    }
     Arc::new(client::Config {
         inactivity_timeout: Some(Duration::from_secs(60 * 30)),
+        preferred,
+        nodelay: true,
         ..Default::default()
     })
 }
@@ -163,13 +179,37 @@ pub async fn probe_ssh_host_key(target: String, port: u16) -> Result<SshHostKey,
         expected_fingerprint: None,
         observed_fingerprint: observed_fingerprint.clone(),
     };
-    let session = timeout(
+    let first_attempt = timeout(
         Duration::from_secs(8),
-        client::connect(ssh_config(), (target.as_str(), port), handler),
+        client::connect(ssh_config(false), (target.as_str(), port), handler),
     )
-    .await
-    .map_err(|_| format!("SSH handshake with {target}:{port} timed out"))?
-    .map_err(|error| format!("SSH handshake with {target}:{port} failed: {error}"))?;
+    .await;
+    let (session, observed_fingerprint, legacy_rsa) = match first_attempt {
+        Ok(Ok(session)) => (session, observed_fingerprint, false),
+        Ok(Err(error)) if error.to_string().contains("Wrong server signature") => {
+            let legacy_observed = Arc::new(std::sync::Mutex::new(None));
+            let legacy_handler = SshHandler {
+                expected_fingerprint: None,
+                observed_fingerprint: legacy_observed.clone(),
+            };
+            let session = timeout(
+                Duration::from_secs(8),
+                client::connect(ssh_config(true), (target.as_str(), port), legacy_handler),
+            )
+            .await
+            .map_err(|_| format!("SSH handshake with {target}:{port} timed out"))?
+            .map_err(|legacy_error| {
+                format!("SSH handshake with {target}:{port} failed: {legacy_error}")
+            })?;
+            (session, legacy_observed, true)
+        }
+        Ok(Err(error)) => {
+            return Err(format!(
+                "SSH handshake with {target}:{port} failed: {error}"
+            ))
+        }
+        Err(_) => return Err(format!("SSH handshake with {target}:{port} timed out")),
+    };
     let _ = session
         .disconnect(russh::Disconnect::ByApplication, "Host key probe", "en")
         .await;
@@ -178,7 +218,10 @@ pub async fn probe_ssh_host_key(target: String, port: u16) -> Result<SshHostKey,
         .map_err(|_| "Unable to read the SSH host key".to_string())?
         .clone()
         .ok_or_else(|| "The SSH server did not provide a host key".to_string())?;
-    Ok(SshHostKey { fingerprint })
+    Ok(SshHostKey {
+        fingerprint,
+        legacy_rsa,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -196,6 +239,7 @@ pub async fn start_terminal_session(
     username: String,
     password: Option<String>,
     trusted_fingerprint: Option<String>,
+    legacy_rsa: bool,
     columns: u32,
     rows: u32,
 ) -> Result<(), String> {
@@ -234,7 +278,7 @@ pub async fn start_terminal_session(
             };
             let mut handle = timeout(
                 Duration::from_secs(10),
-                client::connect(ssh_config(), (target.as_str(), port), handler),
+                client::connect(ssh_config(legacy_rsa), (target.as_str(), port), handler),
             )
             .await
             .map_err(|_| format!("SSH connection to {target}:{port} timed out"))?
@@ -888,5 +932,19 @@ mod tests {
     fn telnet_parser_preserves_escaped_iac() {
         let parsed = TelnetParser::default().consume(&[b'A', 255, 255, b'B']);
         assert_eq!(parsed.output, vec![b'A', 255, b'B']);
+    }
+
+    #[test]
+    fn legacy_retry_prefers_ssh_rsa_only_when_requested() {
+        let modern = ssh_config(false);
+        let legacy = ssh_config(true);
+        assert!(!matches!(
+            modern.preferred.key[0],
+            Algorithm::Rsa { hash: None }
+        ));
+        assert!(matches!(
+            legacy.preferred.key[0],
+            Algorithm::Rsa { hash: None }
+        ));
     }
 }

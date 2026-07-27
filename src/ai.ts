@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import type { AiMessage, AiProvider } from "./types";
 
 export const aiProviders = {
@@ -6,8 +6,6 @@ export const aiProviders = {
   gemini: { name: "Google Gemini", model: "Gemini 3.6 Flash", accent: "#79a7ff" },
   demo: { name: "NetSSH Demo", model: "Offline preview", accent: "#b69cff" },
 } satisfies Record<AiProvider, { name: string; model: string; accent: string }>;
-
-const isTauri = () => "__TAURI_INTERNALS__" in window;
 
 export async function providerIsConnected(provider: Exclude<AiProvider, "demo">): Promise<boolean> {
   if (!isTauri()) return false;

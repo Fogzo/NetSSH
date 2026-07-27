@@ -259,9 +259,12 @@ function App() {
         let connectionUsername = assignedCredential?.username.trim() ?? host.username?.trim() ?? "";
         let connectionPassword: string | undefined;
         if (protocol === "ssh") {
-          const passwordStored = assignedCredential
-            ? await hasCredentialPassword(assignedCredential.id).catch(() => false)
-            : await hasDevicePassword(host.id).catch(() => false);
+          const passwordStored = await Promise.race([
+            assignedCredential
+              ? hasCredentialPassword(assignedCredential.id).catch(() => false)
+              : hasDevicePassword(host.id).catch(() => false),
+            new Promise<false>((resolve) => window.setTimeout(() => resolve(false), 2000)),
+          ]);
           if (!connectionUsername || !passwordStored) {
             const credentials = await requestConnectionCredentials({ host, username: connectionUsername, requirePassword: !passwordStored, credentialId: assignedCredential?.id, credentialLabel: assignedCredential?.label });
             if (!credentials) return null;
@@ -274,10 +277,22 @@ function App() {
           }
         }
         const port = protocol === "serial" ? undefined : host.port ?? (protocol === "telnet" ? 23 : 22);
+        setSessions((current) => [...current, {
+          id,
+          host,
+          connected: false,
+          connectionState: "connecting",
+          lines: [{ kind: "info", text: protocol === "ssh" ? `Preparing SSH connection to ${host.address}:${port}…` : protocol === "serial" ? `Opening ${host.address} at ${host.baudRate ?? 9600} baud…` : `Connecting to ${host.address}:${port} over TELNET…` }],
+        }]);
+        setActiveSession(id);
+        setView("workspace");
         let trustedFingerprint: string | undefined;
+        let legacyRsa = false;
         try {
           if (protocol === "ssh") {
-            const fingerprint = await probeSshHostKey(host.address, port ?? 22);
+            const hostKey = await probeSshHostKey(host.address, port ?? 22);
+            const fingerprint = hostKey.fingerprint;
+            legacyRsa = hostKey.legacyRsa;
             const knownHosts = JSON.parse(localStorage.getItem("netssh.knownHosts") ?? "{}") as Record<string, string>;
             const knownHostId = `${host.address}:${port ?? 22}`;
             const existingFingerprint = knownHosts[knownHostId];
@@ -291,19 +306,11 @@ function App() {
             }
             trustedFingerprint = fingerprint;
           }
-          setSessions((current) => [...current, {
-            id,
-            host,
-            connected: false,
-            connectionState: "connecting",
-            lines: [
-              { kind: "info", text: protocol === "serial" ? `Opening ${host.address} at ${host.baudRate ?? 9600} baud…` : protocol === "telnet" && !connectionUsername ? `Connecting to ${host.address}:${port} over TELNET; enter credentials when prompted…` : `Connecting to ${connectionUsername}@${host.address}:${port} over ${protocol.toUpperCase()}…` },
-              ...(protocol === "telnet" ? [{ kind: "warning" as const, text: "Telnet credentials and session traffic are not encrypted. Use only on a trusted management network." }] : []),
-            ],
-          }]);
-          setActiveSession(id);
-          setView("workspace");
-          await startTerminalSession({ sessionId: id, deviceId: host.id, credentialId: assignedCredential?.id, protocol, target: host.address, port, baudRate: host.baudRate, username: connectionUsername, password: connectionPassword, trustedFingerprint });
+          appendLines(id, [
+            { kind: "info", text: protocol === "serial" ? `Opening ${host.address} at ${host.baudRate ?? 9600} baud…` : protocol === "telnet" && !connectionUsername ? `Connected to ${host.address}:${port}; enter credentials when prompted…` : `Authenticating ${connectionUsername}@${host.address}:${port} over ${protocol.toUpperCase()}…` },
+            ...(protocol === "telnet" ? [{ kind: "warning" as const, text: "Telnet credentials and session traffic are not encrypted. Use only on a trusted management network." }] : []),
+          ]);
+          await startTerminalSession({ sessionId: id, deviceId: host.id, credentialId: assignedCredential?.id, protocol, target: host.address, port, baudRate: host.baudRate, username: connectionUsername, password: connectionPassword, trustedFingerprint, legacyRsa });
           setHistory((current) => [{ id: crypto.randomUUID(), deviceId: host.id, deviceName: host.name, protocol, address: host.address, startedAt: Date.now(), success: true, detail: `${protocol.toUpperCase()} session connected` }, ...current].slice(0, 250));
           return id;
         } catch (caught) {
@@ -514,7 +521,7 @@ function Sidebar({ view, setView, open, setOpen, onSearch, onOpenSettings, onEdi
       </div>
       <div className="sidebar-footer">
         <div className="sync-card"><div className="sync-icon"><ShieldCheck size={17} /></div><div><strong>Local vault</strong><small>Encrypted & secure</small></div><span className="status-dot" /></div>
-        <div className="profile-wrap">{profileOpen && <div className="profile-menu"><button onClick={() => { setProfileOpen(false); onEditProfile(); }}><UserRound size={14} /><span><strong>Your profile</strong><small>Name and role</small></span></button><button onClick={() => { setProfileOpen(false); onOpenSettings(); }}><Settings size={14} /><span><strong>Preferences</strong><small>Workspace, sites, and platforms</small></span></button><button onClick={() => { setProfileOpen(false); setView("credentials"); }}><KeyRound size={14} /><span><strong>Credential vault</strong><small>Manage reusable logins</small></span></button><button onClick={() => { setProfileOpen(false); onShowOnboarding(); }}><Sparkles size={14} /><span><strong>Welcome tour</strong><small>Review the NetSSH basics</small></span></button><button onClick={() => { setProfileOpen(false); notify("NetSSH 0.1.2 · Local workspace"); }}><Network size={14} /><span><strong>About NetSSH</strong><small>Version 0.1.2</small></span></button></div>}<button className="profile" aria-label="Open profile menu" onClick={() => setProfileOpen((value) => !value)}><span className="avatar">{profileInitials(userProfile.name)}</span><span><strong>{userProfile.name || "Network Engineer"}</strong><small>{userProfile.role || "Local workspace"}</small></span><MoreHorizontal size={18} /></button></div>
+        <div className="profile-wrap">{profileOpen && <div className="profile-menu"><button onClick={() => { setProfileOpen(false); onEditProfile(); }}><UserRound size={14} /><span><strong>Your profile</strong><small>Name and role</small></span></button><button onClick={() => { setProfileOpen(false); onOpenSettings(); }}><Settings size={14} /><span><strong>Preferences</strong><small>Workspace, sites, and platforms</small></span></button><button onClick={() => { setProfileOpen(false); setView("credentials"); }}><KeyRound size={14} /><span><strong>Credential vault</strong><small>Manage reusable logins</small></span></button><button onClick={() => { setProfileOpen(false); onShowOnboarding(); }}><Sparkles size={14} /><span><strong>Welcome tour</strong><small>Review the NetSSH basics</small></span></button><button onClick={() => { setProfileOpen(false); notify("NetSSH 0.1.3 · Local workspace"); }}><Network size={14} /><span><strong>About NetSSH</strong><small>Version 0.1.3</small></span></button></div>}<button className="profile" aria-label="Open profile menu" onClick={() => setProfileOpen((value) => !value)}><span className="avatar">{profileInitials(userProfile.name)}</span><span><strong>{userProfile.name || "Network Engineer"}</strong><small>{userProfile.role || "Local workspace"}</small></span><MoreHorizontal size={18} /></button></div>
       </div>
     </aside>
   );

@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 
 export type SecurityAdvisory = {
@@ -9,8 +9,6 @@ export type SecurityAdvisory = {
   published: string;
   severity: "Critical" | "High" | "Medium" | "Advisory";
 };
-
-const isTauri = () => "__TAURI_INTERNALS__" in window;
 
 export const securityFeedFallback: SecurityAdvisory[] = [
   {
@@ -33,7 +31,10 @@ export const securityFeedFallback: SecurityAdvisory[] = [
 
 export async function fetchSecurityAdvisories(): Promise<SecurityAdvisory[]> {
   if (!isTauri()) return securityFeedFallback;
-  const advisories = await invoke<SecurityAdvisory[]>("fetch_security_advisories");
+  const advisories = await Promise.race([
+    invoke<SecurityAdvisory[]>("fetch_security_advisories"),
+    new Promise<SecurityAdvisory[]>((resolve) => window.setTimeout(() => resolve([]), 6500)),
+  ]);
   return advisories.length ? advisories : securityFeedFallback;
 }
 

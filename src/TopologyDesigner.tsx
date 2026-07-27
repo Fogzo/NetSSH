@@ -266,8 +266,11 @@ export function TopologyDesigner({ hosts, onConnect, notify }: { hosts: Host[]; 
   const selectedLink = selected?.type === "link" ? map.links.find((link) => link.id === selected.id) : undefined;
 
   useEffect(() => {
-    localStorage.setItem(DESIGNS_STORAGE_KEY, JSON.stringify(workspace));
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(map));
+    const timer = window.setTimeout(() => {
+      localStorage.setItem(DESIGNS_STORAGE_KEY, JSON.stringify(workspace));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(map));
+    }, 250);
+    return () => window.clearTimeout(timer);
   }, [workspace, map]);
 
   useEffect(() => {
