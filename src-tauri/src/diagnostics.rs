@@ -225,12 +225,14 @@ pub async fn run_port_check(target: String, port: u16) -> Result<DiagnosticResul
     }
 }
 
+#[cfg(target_os = "macos")]
 fn field_value(line: &str) -> Option<(&str, &str)> {
     line.trim()
         .split_once(':')
         .map(|(key, value)| (key.trim(), value.trim()))
 }
 
+#[cfg(target_os = "macos")]
 fn integer_values(value: &str) -> Vec<i32> {
     value
         .split(|character: char| !character.is_ascii_digit() && character != '-')
@@ -239,6 +241,7 @@ fn integer_values(value: &str) -> Vec<i32> {
         .collect()
 }
 
+#[cfg(target_os = "macos")]
 fn infer_band(channel: &str) -> Option<String> {
     let lower = channel.to_ascii_lowercase();
     if lower.contains("6ghz") {
@@ -479,7 +482,7 @@ pub fn open_wifi_privacy_settings() -> Result<(), String> {
             .arg("ms-settings:privacy-location")
             .spawn()
             .map_err(|error| format!("Unable to open Windows Location settings: {error}"))?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(target_os = "windows"))]
     Err("Wi-Fi privacy settings are managed by Windows".into())
