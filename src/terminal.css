@@ -19,7 +19,9 @@
 .xterm-host {
   flex: 1;
   min-height: 0;
-  padding: 12px 14px 5px;
+  border-style: solid;
+  border-color: #070b10;
+  border-width: 12px 14px 30px;
   overflow: hidden;
   background: #070b10;
 }
@@ -62,6 +64,15 @@
 .terminal-info-badge.protocol.serial { border-color: rgba(210, 168, 255, .26); background: rgba(91, 60, 124, .17); color: #d2a8ff; }
 .terminal-info-platform { margin-left: auto; padding: 0 4px; color: #62717d; font: 600 8px "Inter", sans-serif; white-space: nowrap; }
 
+.terminal-toolbar-device { min-width: 0; overflow: hidden; }
+.terminal-toolbar-address { flex: none; color: #65727f; }
+.session-connection-badges { min-width: 0; display: flex; align-items: center; gap: 4px; overflow: hidden; }
+.terminal-toolbar .session-connection-badges { margin-left: 3px; }
+.terminal-toolbar .terminal-info-badge { height: 20px; padding-inline: 7px; }
+.session-connection-badges.compact { margin-left: auto; flex: none; }
+.session-connection-badges.compact .terminal-info-badge { height: 20px; padding-inline: 6px; font-size: 7px; }
+.session-connection-badges.compact .latency-badge { display: none; }
+
 .xterm-host .xterm {
   width: 100%;
   height: 100%;
@@ -77,7 +88,7 @@
 }
 
 .session-pane .xterm-host {
-  padding: 9px 10px 4px;
+  border-width: 9px 10px 26px;
 }
 
 .terminal-actions {
@@ -177,13 +188,19 @@
 .terminal-login .terminal-login-save span { display: inline; margin: 0; }
 .terminal-login form > .primary-button { width: 100%; height: 38px; margin-top: 17px; }
 
-.terminal-autocomplete { position: absolute; z-index: 8; left: 20px; bottom: 31px; width: min(560px, calc(100% - 40px)); padding: 7px; border: 1px solid #30414d; border-radius: 11px; background: rgba(11, 18, 24, .98); box-shadow: 0 18px 48px rgba(0,0,0,.5), 0 0 0 1px rgba(114,230,177,.03); backdrop-filter: blur(12px); }
-.terminal-autocomplete-heading { min-height: 29px; padding: 2px 7px 7px; display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.terminal-shell { background: #070b10; }
+.terminal-shell > .terminal-session-info { order: 0; }
+.terminal-shell > .terminal-autocomplete { order: 1; }
+.terminal-shell > .xterm-host { order: 2; }
+.terminal-shell > .terminal-status { order: 3; }
+.terminal-autocomplete { position: relative; width: auto; height: 40px; flex: none; margin: 0; padding: 5px 12px; overflow-x: auto; overflow-y: hidden; border: 0; border-top: 1px solid #17232c; background: #090f14; box-shadow: none; display:flex; align-items:center; gap:5px; scrollbar-width:none; }
+.terminal-autocomplete::-webkit-scrollbar { display:none; }
+.terminal-autocomplete-heading { min-width: 124px; height: 30px; flex:none; padding: 0 9px 0 2px; border: 0; display: flex; align-items: center; gap: 8px; }
 .terminal-autocomplete-heading > span { color: #a8b7c2; display: flex; align-items: center; gap: 6px; font: 600 9px "Inter", sans-serif; }
 .terminal-autocomplete-heading > span svg { color: #72e6b1; }
-.terminal-autocomplete-heading small { color: #586873; font: 8px "Inter", sans-serif; white-space: nowrap; }
+.terminal-autocomplete-heading small { display:none; }
 .terminal-autocomplete-heading kbd { min-width: 18px; height: 17px; padding: 0 4px; border: 1px solid #344550; border-bottom-color: #455a67; border-radius: 4px; background: #152029; color: #92a2ad; display: inline-grid; place-items: center; font: 7px "Inter", sans-serif; }
-.terminal-autocomplete button { width: 100%; min-height: 31px; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: #93a2ad; display: flex; align-items: center; gap: 8px; text-align: left; cursor: pointer; }
+.terminal-autocomplete button { width:auto; min-width:max-content; height:30px; flex:none; padding: 0 8px; border: 0; border-radius: 6px; background: transparent; color: #93a2ad; display: flex; align-items: center; gap: 7px; text-align: left; cursor: pointer; }
 .terminal-autocomplete button.active, .terminal-autocomplete button:hover { background: #17251f; color: #72e6b1; }
 .terminal-autocomplete button.action.active, .terminal-autocomplete button.action:hover { background: #292319; color: #f2cc60; }
 .terminal-autocomplete button.configure.active, .terminal-autocomplete button.configure:hover { background: #17232d; color: #8ac9ff; }
@@ -192,21 +209,34 @@
 .terminal-autocomplete button.show em { color: #68bd99; }
 .terminal-autocomplete button.configure em { color: #70aedd; }
 .terminal-autocomplete button.action em { color: #c9a84f; }
+.terminal-autocomplete-idle { padding-left: 4px; color: #53616c; font: 9px "Inter", sans-serif; white-space: nowrap; }
+.theme-light .terminal-shell { background: #070b10; color: #d7dee7; border-color: #070b10; }
+.theme-light .terminal-shell .xterm-host { border-color: #070b10; background: #070b10; }
+.theme-light .terminal-shell .terminal-session-info { border-color: #1b2730; background: linear-gradient(90deg, #0b1218, #0d151b); }
+.theme-light .terminal-shell .terminal-autocomplete { border-color: #17232c; background: #090f14; }
+.theme-light .terminal-shell .terminal-status { border-color: #17232c; background: #0d151b; color: #596674; }
+.theme-light .terminal-shell .terminal-status span:first-child { color: #7b998c; }
 
 @media(max-width:720px) {
-  .terminal-autocomplete-heading small { display: none; }
+  .terminal-autocomplete-heading { min-width:36px; width:36px; padding:0 8px; }
+  .terminal-autocomplete-heading > span { font-size:0; }
   .terminal-info-platform { display: none; }
+  .terminal-toolbar-address { display: none; }
+  .terminal-toolbar .session-connection-badges .terminal-info-badge:nth-child(3) { display: none; }
 }
 
 @media(max-height:700px) {
   .terminal-session-info { min-height: 29px; padding-block: 3px; }
   .terminal-info-badge { height: 20px; }
-  .xterm-host { padding-top: 7px; }
-  .terminal-autocomplete { bottom: 27px; }
+  .xterm-host { border-top-width: 7px; border-bottom-width: 26px; }
+  .terminal-autocomplete { height:36px; padding-block:3px; }
 }
 
 @media(max-height:520px) {
   .terminal-session-info { display: none; }
   .terminal-status { height: 22px; }
-  .xterm-host { padding: 5px 9px 2px; }
+  .xterm-host { border-width: 5px 9px 24px; }
+  .terminal-autocomplete { height:32px; padding-inline:9px; }
+  .terminal-autocomplete-heading,.terminal-autocomplete button { height:26px; }
+  .terminal-autocomplete em { display:none; }
 }

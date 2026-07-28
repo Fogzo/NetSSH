@@ -1,5 +1,5 @@
-use russh::client;
 use russh::keys::ssh_key::{Algorithm, PublicKey};
+use russh::{client, kex};
 use serde::Serialize;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -25,6 +25,7 @@ pub struct ConnectionPreflightResult {
 pub struct SshHostKey {
     fingerprint: String,
     legacy_rsa: bool,
+    legacy_kex: bool,
 }
 
 #[derive(Serialize)]
@@ -113,8 +114,14 @@ fn emit_terminal(app: &AppHandle, session_id: &str, kind: &'static str, data: im
     );
 }
 
-fn ssh_config(legacy_rsa: bool) -> Arc<client::Config> {
+fn ssh_config(legacy_rsa: bool, legacy_kex: bool) -> Arc<client::Config> {
     let mut preferred = russh::Preferred::default();
+    if legacy_kex {
+        let mut algorithms = preferred.kex.to_vec();
+        algorithms.push(kex::DH_G14_SHA1);
+        algorithms.push(kex::DH_G1_SHA1);
+        preferred.kex = Cow::Owned(algorithms);
+    }
     if legacy_rsa {
         let mut keys = preferred.key.to_vec();
         if let Some(index) = keys
@@ -181,41 +188,41 @@ async fn tcp_preflight(
 pub async fn probe_ssh_host_key(target: String, port: u16) -> Result<SshHostKey, String> {
     let target = validate_target(&target, "ssh")?;
     let port = validate_port(port)?;
-    let observed_fingerprint = Arc::new(std::sync::Mutex::new(None));
-    let handler = SshHandler {
-        expected_fingerprint: None,
-        observed_fingerprint: observed_fingerprint.clone(),
-    };
-    let first_attempt = timeout(
-        Duration::from_secs(8),
-        client::connect(ssh_config(false), (target.as_str(), port), handler),
-    )
-    .await;
-    let (session, observed_fingerprint, legacy_rsa) = match first_attempt {
-        Ok(Ok(session)) => (session, observed_fingerprint, false),
-        Ok(Err(error)) if error.to_string().contains("Wrong server signature") => {
-            let legacy_observed = Arc::new(std::sync::Mutex::new(None));
-            let legacy_handler = SshHandler {
-                expected_fingerprint: None,
-                observed_fingerprint: legacy_observed.clone(),
-            };
-            let session = timeout(
-                Duration::from_secs(8),
-                client::connect(ssh_config(true), (target.as_str(), port), legacy_handler),
-            )
-            .await
-            .map_err(|_| format!("SSH handshake with {target}:{port} timed out"))?
-            .map_err(|legacy_error| {
-                format!("SSH handshake with {target}:{port} failed: {legacy_error}")
-            })?;
-            (session, legacy_observed, true)
+    let mut legacy_rsa = false;
+    let mut legacy_kex = false;
+    let (session, observed_fingerprint) = loop {
+        let observed = Arc::new(std::sync::Mutex::new(None));
+        let handler = SshHandler {
+            expected_fingerprint: None,
+            observed_fingerprint: observed.clone(),
+        };
+        match timeout(
+            Duration::from_secs(8),
+            client::connect(
+                ssh_config(legacy_rsa, legacy_kex),
+                (target.as_str(), port),
+                handler,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(session)) => break (session, observed),
+            Ok(Err(error)) => {
+                let message = error.to_string();
+                if message.contains("No common Kex Algorithm") && !legacy_kex {
+                    legacy_kex = true;
+                    continue;
+                }
+                if message.contains("Wrong server signature") && !legacy_rsa {
+                    legacy_rsa = true;
+                    continue;
+                }
+                return Err(format!(
+                    "SSH handshake with {target}:{port} failed: {error}"
+                ));
+            }
+            Err(_) => return Err(format!("SSH handshake with {target}:{port} timed out")),
         }
-        Ok(Err(error)) => {
-            return Err(format!(
-                "SSH handshake with {target}:{port} failed: {error}"
-            ))
-        }
-        Err(_) => return Err(format!("SSH handshake with {target}:{port} timed out")),
     };
     let _ = session
         .disconnect(russh::Disconnect::ByApplication, "Host key probe", "en")
@@ -228,6 +235,7 @@ pub async fn probe_ssh_host_key(target: String, port: u16) -> Result<SshHostKey,
     Ok(SshHostKey {
         fingerprint,
         legacy_rsa,
+        legacy_kex,
     })
 }
 
@@ -239,8 +247,10 @@ pub async fn collect_switch_interface_data(
     target: String,
     port: u16,
     username: String,
+    password: Option<String>,
     trusted_fingerprint: String,
     legacy_rsa: bool,
+    legacy_kex: bool,
 ) -> Result<SwitchInterfaceOutput, String> {
     let started = Instant::now();
     let target = validate_target(&target, "ssh")?;
@@ -251,12 +261,13 @@ pub async fn collect_switch_interface_data(
             "Assign a credential profile with a username before running a switch audit".into(),
         );
     }
-    let password = credential_id
-        .as_deref()
-        .and_then(|id| super::credential_entry(id).ok()?.get_password().ok())
-        .or_else(|| super::device_entry(&device_id).ok()?.get_password().ok())
+    let password = super::resolve_login_password(
+        password,
+        credential_id.as_deref(),
+        &device_id,
+    )?
         .ok_or_else(|| {
-            "The selected switch needs a saved login password for unattended auditing".to_string()
+            "The assigned login has no stored password. Enter it in Switch Audit or save it in the Credential vault".to_string()
         })?;
     let observed = Arc::new(std::sync::Mutex::new(None));
     let handler = SshHandler {
@@ -265,7 +276,11 @@ pub async fn collect_switch_interface_data(
     };
     let mut handle = timeout(
         Duration::from_secs(10),
-        client::connect(ssh_config(legacy_rsa), (target.as_str(), port), handler),
+        client::connect(
+            ssh_config(legacy_rsa, legacy_kex),
+            (target.as_str(), port),
+            handler,
+        ),
     )
     .await
     .map_err(|_| format!("SSH connection to {target}:{port} timed out"))?
@@ -329,6 +344,7 @@ pub async fn start_terminal_session(
     password: Option<String>,
     trusted_fingerprint: Option<String>,
     legacy_rsa: bool,
+    legacy_kex: bool,
     columns: u32,
     rows: u32,
 ) -> Result<(), String> {
@@ -337,14 +353,11 @@ pub async fn start_terminal_session(
     }
     let target = validate_target(&target, &protocol)?;
     let username = username.trim().to_owned();
-    let password = password
-        .filter(|value| !value.is_empty())
-        .or_else(|| {
-            credential_id
-                .as_deref()
-                .and_then(|id| super::credential_entry(id).ok()?.get_password().ok())
-        })
-        .or_else(|| super::device_entry(&device_id).ok()?.get_password().ok());
+    let password = if protocol == "serial" {
+        password.filter(|value| !value.is_empty())
+    } else {
+        super::resolve_login_password(password, credential_id.as_deref(), &device_id)?
+    };
 
     if manager.sessions.lock().await.contains_key(&session_id) {
         return Err("A terminal session with this identifier already exists".into());
@@ -367,7 +380,11 @@ pub async fn start_terminal_session(
             };
             let mut handle = timeout(
                 Duration::from_secs(10),
-                client::connect(ssh_config(legacy_rsa), (target.as_str(), port), handler),
+                client::connect(
+                    ssh_config(legacy_rsa, legacy_kex),
+                    (target.as_str(), port),
+                    handler,
+                ),
             )
             .await
             .map_err(|_| format!("SSH connection to {target}:{port} timed out"))?
@@ -1025,8 +1042,8 @@ mod tests {
 
     #[test]
     fn legacy_retry_prefers_ssh_rsa_only_when_requested() {
-        let modern = ssh_config(false);
-        let legacy = ssh_config(true);
+        let modern = ssh_config(false, false);
+        let legacy = ssh_config(true, false);
         assert!(!matches!(
             modern.preferred.key[0],
             Algorithm::Rsa { hash: None }
@@ -1035,5 +1052,15 @@ mod tests {
             legacy.preferred.key[0],
             Algorithm::Rsa { hash: None }
         ));
+    }
+
+    #[test]
+    fn legacy_kex_is_added_only_for_compatibility_retry() {
+        let modern = ssh_config(false, false);
+        let legacy = ssh_config(false, true);
+        assert!(!modern.preferred.kex.contains(&kex::DH_G14_SHA1));
+        assert!(!modern.preferred.kex.contains(&kex::DH_G1_SHA1));
+        assert!(legacy.preferred.kex.contains(&kex::DH_G14_SHA1));
+        assert!(legacy.preferred.kex.contains(&kex::DH_G1_SHA1));
     }
 }

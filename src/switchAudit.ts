@@ -66,7 +66,7 @@ export function parseCiscoInterfaceAudit(output: string, minimumWeeks: number): 
   });
 }
 
-export async function runLiveSwitchAudit(host: Host, credential: CredentialProfile, minimumWeeks: number): Promise<LiveSwitchAudit> {
+export async function runLiveSwitchAudit(host: Host, credential: CredentialProfile, minimumWeeks: number, password?: string): Promise<LiveSwitchAudit> {
   const port = host.port ?? 22;
   const hostKey = await probeSshHostKey(host.address, port);
   const knownHosts = JSON.parse(localStorage.getItem("netssh.knownHosts") ?? "{}") as Record<string, string>;
@@ -86,8 +86,10 @@ export async function runLiveSwitchAudit(host: Host, credential: CredentialProfi
     target: host.address,
     port,
     username: credential.username,
+    password,
     trustedFingerprint: hostKey.fingerprint,
     legacyRsa: hostKey.legacyRsa,
+    legacyKex: hostKey.legacyKex,
   });
   return { deviceName: host.name, address: host.address, checkedAt: Date.now(), minimumWeeks, elapsedMs: result.elapsedMs, ports: parseCiscoInterfaceAudit(result.output, minimumWeeks), rawOutput: result.output };
 }

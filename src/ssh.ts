@@ -15,8 +15,8 @@ export interface TerminalEvent {
   data: string;
 }
 
-export async function probeSshHostKey(target: string, port: number): Promise<{ fingerprint: string; legacyRsa: boolean }> {
-  return invoke<{ fingerprint: string; legacyRsa: boolean }>("probe_ssh_host_key", { target, port });
+export async function probeSshHostKey(target: string, port: number): Promise<{ fingerprint: string; legacyRsa: boolean; legacyKex: boolean }> {
+  return invoke<{ fingerprint: string; legacyRsa: boolean; legacyKex: boolean }>("probe_ssh_host_key", { target, port });
 }
 
 export async function startTerminalSession(options: {
@@ -31,6 +31,7 @@ export async function startTerminalSession(options: {
   password?: string;
   trustedFingerprint?: string;
   legacyRsa?: boolean;
+  legacyKex?: boolean;
   columns?: number;
   rows?: number;
 }): Promise<void> {
@@ -38,6 +39,7 @@ export async function startTerminalSession(options: {
     ...options,
     trustedFingerprint: options.trustedFingerprint ?? null,
     legacyRsa: options.legacyRsa ?? false,
+    legacyKex: options.legacyKex ?? false,
     credentialId: options.credentialId ?? null,
     port: options.port ?? null,
     baudRate: options.baudRate ?? null,

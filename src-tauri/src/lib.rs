@@ -306,6 +306,34 @@ fn credential_enable_entry(credential_id: &str) -> Result<Entry, String> {
     device_entry(&format!("{credential_id}_enable"))
 }
 
+pub(crate) fn resolve_login_password(
+    supplied_password: Option<String>,
+    credential_id: Option<&str>,
+    device_id: &str,
+) -> Result<Option<String>, String> {
+    if let Some(password) = supplied_password.filter(|value| !value.is_empty()) {
+        return Ok(Some(password));
+    }
+    if let Some(credential_id) = credential_id {
+        match credential_entry(credential_id)?.get_password() {
+            Ok(password) => return Ok(Some(password)),
+            Err(keyring::Error::NoEntry) => {}
+            Err(error) => {
+                return Err(format!(
+                    "The operating-system vault could not read the assigned login password: {error}"
+                ))
+            }
+        }
+    }
+    match device_entry(device_id)?.get_password() {
+        Ok(password) => Ok(Some(password)),
+        Err(keyring::Error::NoEntry) => Ok(None),
+        Err(error) => Err(format!(
+            "The operating-system vault could not read the legacy device password: {error}"
+        )),
+    }
+}
+
 #[tauri::command]
 fn save_credential_password(credential_id: String, password: String) -> Result<(), String> {
     if password.is_empty() {
@@ -556,6 +584,13 @@ mod tests {
         assert_eq!(advisories.len(), 1);
         assert_eq!(advisories[0].title, "Critical Cisco update");
         assert_eq!(advisories[0].severity, "Critical");
+    }
+
+    #[test]
+    fn supplied_login_password_bypasses_vault_lookup() {
+        let password = resolve_login_password(Some("one-time-secret".into()), None, "device-1")
+            .expect("supplied password should not access the vault");
+        assert_eq!(password.as_deref(), Some("one-time-secret"));
     }
 
     #[test]
