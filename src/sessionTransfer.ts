@@ -1,4 +1,4 @@
-import type { ConnectionProtocol, CredentialProfile, Host } from "./types";
+import type { ConnectionProtocol, CredentialProfile, DeviceRole, Host } from "./types";
 
 export type SessionImportFormat = "auto" | "netssh" | "putty" | "mobaxterm" | "csv";
 
@@ -12,6 +12,7 @@ export interface ImportedSession {
   credentialLabel?: string;
   site?: string;
   platform?: string;
+  deviceRole?: DeviceRole;
   tags?: string[];
 }
 
@@ -35,6 +36,8 @@ const decodeName = (value: string) => {
 };
 
 const cleanRegistryValue = (value: string) => value.replace(/^"|"$/g, "").replace(/\\"/g, "\"").replace(/\\\\/g, "\\");
+const validDeviceRoles = new Set<DeviceRole>(["core", "distribution", "access", "router", "firewall", "wireless-controller", "access-point", "server", "other"]);
+const parseDeviceRole = (value?: string): DeviceRole | undefined => value && validDeviceRoles.has(value as DeviceRole) ? value as DeviceRole : undefined;
 
 export function decodeSessionFile(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
@@ -120,7 +123,7 @@ function parseCsv(content: string): SessionImportResult {
     const row = Object.fromEntries(headers.map((header, index) => [header, values[index] ?? ""]));
     if (!row.name || !row.address) return [];
     const protocol: ConnectionProtocol = row.protocol === "telnet" ? "telnet" : row.protocol === "serial" ? "serial" : "ssh";
-    return [{ name: row.name, address: row.address, protocol, port: protocol === "serial" ? undefined : Number(row.port) || (protocol === "telnet" ? 23 : 22), baudRate: protocol === "serial" ? Number(row.baudrate) || 9600 : undefined, username: row.username || undefined, site: row.site || "Imported", platform: row.platform || "Other", tags: row.tags ? row.tags.split(";").map((tag) => tag.trim()).filter(Boolean) : ["imported"] }];
+    return [{ name: row.name, address: row.address, protocol, port: protocol === "serial" ? undefined : Number(row.port) || (protocol === "telnet" ? 23 : 22), baudRate: protocol === "serial" ? Number(row.baudrate) || 9600 : undefined, username: row.username || undefined, site: row.site || "Imported", platform: row.platform || "Other", deviceRole: parseDeviceRole(row.role), tags: row.tags ? row.tags.split(";").map((tag) => tag.trim()).filter(Boolean) : ["imported"] }];
   });
   return { sessions, warnings: sessions.length ? [] : ["No valid CSV rows were found."], format: "csv" };
 }
@@ -130,7 +133,7 @@ function parseNetSsh(content: string): SessionImportResult {
   const devices = Array.isArray(parsed) ? parsed : parsed.devices ?? [];
   const profiles = Array.isArray(parsed) ? [] : parsed.credentialProfiles ?? [];
   const profileMap = new Map(profiles.map((profile) => [profile.id, profile]));
-  const sessions = devices.map((host) => ({ name: host.name, address: host.address, protocol: host.protocol ?? "ssh", port: host.port, baudRate: host.baudRate, username: profileMap.get(host.credentialId ?? "")?.username ?? host.username, credentialLabel: profileMap.get(host.credentialId ?? "")?.label, site: host.site, platform: host.platform, tags: host.tags }));
+  const sessions = devices.map((host) => ({ name: host.name, address: host.address, protocol: host.protocol ?? "ssh", port: host.port, baudRate: host.baudRate, username: profileMap.get(host.credentialId ?? "")?.username ?? host.username, credentialLabel: profileMap.get(host.credentialId ?? "")?.label, site: host.site, platform: host.platform, deviceRole: host.deviceRole, tags: host.tags }));
   return { sessions, warnings: ["Passwords and enable passwords are intentionally excluded and must be entered again."], format: "netssh" };
 }
 
@@ -152,6 +155,6 @@ const csvValue = (value: unknown) => `"${String(value ?? "").replace(/"/g, '""')
 
 export function createSessionCsv(hosts: Host[], credentialProfiles: CredentialProfile[]): string {
   const profileMap = new Map(credentialProfiles.map((profile) => [profile.id, profile]));
-  const rows = hosts.map((host) => [host.name, host.address, host.protocol ?? "ssh", host.protocol === "serial" ? "" : host.port ?? ((host.protocol ?? "ssh") === "telnet" ? 23 : 22), host.baudRate ?? "", profileMap.get(host.credentialId ?? "")?.username ?? host.username ?? "", host.site, host.platform, (host.tags ?? []).join(";")]);
-  return [["name", "address", "protocol", "port", "baudRate", "username", "site", "platform", "tags"], ...rows].map((row) => row.map(csvValue).join(",")).join("\r\n");
+  const rows = hosts.map((host) => [host.name, host.address, host.protocol ?? "ssh", host.protocol === "serial" ? "" : host.port ?? ((host.protocol ?? "ssh") === "telnet" ? 23 : 22), host.baudRate ?? "", profileMap.get(host.credentialId ?? "")?.username ?? host.username ?? "", host.site, host.platform, host.deviceRole ?? "", (host.tags ?? []).join(";")]);
+  return [["name", "address", "protocol", "port", "baudRate", "username", "site", "platform", "role", "tags"], ...rows].map((row) => row.map(csvValue).join(",")).join("\r\n");
 }

@@ -126,6 +126,19 @@ fn platform_name() -> &'static str {
     std::env::consts::OS
 }
 
+#[tauri::command]
+fn complete_startup(app: tauri::AppHandle) -> Result<(), String> {
+    let main = app
+        .get_webview_window("main")
+        .ok_or_else(|| "The main NetSSH window is unavailable".to_string())?;
+    main.show().map_err(|error| error.to_string())?;
+    main.set_focus().map_err(|error| error.to_string())?;
+    if let Some(splashscreen) = app.get_webview_window("splashscreen") {
+        splashscreen.close().map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WebviewBounds {
@@ -537,6 +550,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             platform_name,
+            complete_startup,
             open_ai_webview,
             resize_ai_webview,
             close_ai_webview,
@@ -560,6 +574,7 @@ pub fn run() {
             diagnostics::run_port_check,
             diagnostics::run_wifi_diagnostic,
             diagnostics::open_wifi_privacy_settings,
+            ssh::list_serial_ports,
             ssh::connection_preflight,
             ssh::probe_ssh_host_key,
             ssh::collect_switch_interface_data,

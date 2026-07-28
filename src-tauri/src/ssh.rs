@@ -1,6 +1,7 @@
 use russh::keys::ssh_key::{Algorithm, PublicKey};
 use russh::{client, kex};
 use serde::Serialize;
+use serialport::SerialPortType;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{ErrorKind, Read, Write};
@@ -33,6 +34,69 @@ pub struct SshHostKey {
 pub struct SwitchInterfaceOutput {
     output: String,
     elapsed_ms: u128,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SerialPortInfo {
+    name: String,
+    port_type: String,
+    display_name: String,
+    manufacturer: Option<String>,
+    product: Option<String>,
+    serial_number: Option<String>,
+    vendor_id: Option<u16>,
+    product_id: Option<u16>,
+}
+
+#[tauri::command]
+pub async fn list_serial_ports() -> Result<Vec<SerialPortInfo>, String> {
+    tokio::task::spawn_blocking(|| {
+        let mut ports = serialport::available_ports()
+            .map_err(|error| format!("Unable to inspect serial ports: {error}"))?
+            .into_iter()
+            .map(|port| {
+                let (port_type, manufacturer, product, serial_number, vendor_id, product_id) =
+                    match port.port_type {
+                        SerialPortType::UsbPort(info) => (
+                            "USB".to_string(),
+                            info.manufacturer,
+                            info.product,
+                            info.serial_number,
+                            Some(info.vid),
+                            Some(info.pid),
+                        ),
+                        SerialPortType::BluetoothPort => {
+                            ("Bluetooth".to_string(), None, None, None, None, None)
+                        }
+                        SerialPortType::PciPort => {
+                            ("PCI".to_string(), None, None, None, None, None)
+                        }
+                        SerialPortType::Unknown => {
+                            ("Serial".to_string(), None, None, None, None, None)
+                        }
+                    };
+                let description = product
+                    .as_deref()
+                    .or(manufacturer.as_deref())
+                    .unwrap_or(&port_type);
+                SerialPortInfo {
+                    display_name: format!("{} — {description}", port.port_name),
+                    name: port.port_name,
+                    port_type,
+                    manufacturer,
+                    product,
+                    serial_number,
+                    vendor_id,
+                    product_id,
+                }
+            })
+            .collect::<Vec<_>>();
+        ports.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(ports)
+    })
+    .await
+    .map_err(|error| format!("Serial port discovery stopped unexpectedly: {error}"))?
 }
 
 #[derive(Clone, Serialize)]
@@ -118,8 +182,10 @@ fn ssh_config(legacy_rsa: bool, legacy_kex: bool) -> Arc<client::Config> {
     let mut preferred = russh::Preferred::default();
     if legacy_kex {
         let mut algorithms = preferred.kex.to_vec();
-        algorithms.push(kex::DH_G14_SHA1);
-        algorithms.push(kex::DH_G1_SHA1);
+        algorithms
+            .retain(|algorithm| *algorithm != kex::DH_G14_SHA1 && *algorithm != kex::DH_G1_SHA1);
+        algorithms.insert(0, kex::DH_G1_SHA1);
+        algorithms.insert(0, kex::DH_G14_SHA1);
         preferred.kex = Cow::Owned(algorithms);
     }
     if legacy_rsa {
@@ -139,6 +205,12 @@ fn ssh_config(legacy_rsa: bool, legacy_kex: bool) -> Arc<client::Config> {
         nodelay: true,
         ..Default::default()
     })
+}
+
+fn no_common_kex_algorithm(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.contains("no common kex algorithm")
+        || message.contains("no common key exchange algorithm")
 }
 
 async fn tcp_preflight(
@@ -209,7 +281,7 @@ pub async fn probe_ssh_host_key(target: String, port: u16) -> Result<SshHostKey,
             Ok(Ok(session)) => break (session, observed),
             Ok(Err(error)) => {
                 let message = error.to_string();
-                if message.contains("No common Kex Algorithm") && !legacy_kex {
+                if no_common_kex_algorithm(&message) && !legacy_kex {
                     legacy_kex = true;
                     continue;
                 }
@@ -353,11 +425,28 @@ pub async fn start_terminal_session(
     }
     let target = validate_target(&target, &protocol)?;
     let username = username.trim().to_owned();
+    let mut vault_warning = None;
     let password = if protocol == "serial" {
         password.filter(|value| !value.is_empty())
     } else {
-        super::resolve_login_password(password, credential_id.as_deref(), &device_id)?
+        match super::resolve_login_password(password, credential_id.as_deref(), &device_id) {
+            Ok(password) => password,
+            Err(error) => {
+                vault_warning = Some(error);
+                None
+            }
+        }
     };
+    if let Some(warning) = vault_warning {
+        emit_terminal(
+            &app,
+            &session_id,
+            "info",
+            format!(
+                "Saved password unavailable; continuing with terminal authentication. {warning}"
+            ),
+        );
+    }
 
     if manager.sessions.lock().await.contains_key(&session_id) {
         return Err("A terminal session with this identifier already exists".into());
@@ -366,9 +455,6 @@ pub async fn start_terminal_session(
     let (sender, receiver) = mpsc::channel(64);
     match protocol.as_str() {
         "ssh" => {
-            if username.is_empty() {
-                return Err("SSH requires a username before authentication can begin".into());
-            }
             let port = validate_port(port.unwrap_or(22))?;
             let expected = trusted_fingerprint
                 .filter(|fingerprint| !fingerprint.trim().is_empty())
@@ -389,6 +475,18 @@ pub async fn start_terminal_session(
             .await
             .map_err(|_| format!("SSH connection to {target}:{port} timed out"))?
             .map_err(|error| format!("SSH connection to {target}:{port} failed: {error}"))?;
+            if username.is_empty() {
+                manager
+                    .sessions
+                    .lock()
+                    .await
+                    .insert(session_id.clone(), sender);
+                let sessions = manager.sessions.clone();
+                tokio::spawn(run_ssh_terminal_login(
+                    app, sessions, session_id, handle, receiver, columns, rows,
+                ));
+                return Ok(());
+            }
             let authentication = if let Some(password) = password.as_deref() {
                 handle
                     .authenticate_password(&username, password)
@@ -503,6 +601,34 @@ pub async fn start_terminal_session(
         _ => unreachable!(),
     }
     Ok(())
+}
+
+async fn run_ssh_terminal_login(
+    app: AppHandle,
+    sessions: Arc<Mutex<HashMap<String, mpsc::Sender<TerminalAction>>>>,
+    session_id: String,
+    handle: client::Handle<SshHandler>,
+    mut receiver: mpsc::Receiver<TerminalAction>,
+    columns: u32,
+    rows: u32,
+) {
+    emit_terminal(&app, &session_id, "data", "\r\nlogin as: ");
+    let Some(username) = read_auth_line(&app, &session_id, &mut receiver, true).await else {
+        sessions.lock().await.remove(&session_id);
+        emit_terminal(&app, &session_id, "closed", "SSH session closed");
+        return;
+    };
+    let username = username.trim().to_owned();
+    if username.is_empty() {
+        emit_terminal(&app, &session_id, "error", "An SSH username is required");
+        sessions.lock().await.remove(&session_id);
+        emit_terminal(&app, &session_id, "closed", "SSH session closed");
+        return;
+    }
+    run_ssh_keyboard_interactive_auth(
+        app, sessions, session_id, handle, receiver, username, columns, rows,
+    )
+    .await;
 }
 
 fn run_serial_session(
@@ -628,22 +754,12 @@ async fn run_ssh_keyboard_interactive_auth(
         "\r\nSSH keyboard-interactive authentication\r\n",
     );
     let mut response = handle
-        .authenticate_keyboard_interactive_start(username, None)
+        .authenticate_keyboard_interactive_start(username.clone(), None)
         .await;
-    loop {
+    let keyboard_authenticated = loop {
         match response {
-            Ok(client::KeyboardInteractiveAuthResponse::Success) => break,
-            Ok(client::KeyboardInteractiveAuthResponse::Failure { .. }) => {
-                emit_terminal(
-                    &app,
-                    &session_id,
-                    "error",
-                    "SSH keyboard-interactive authentication was rejected",
-                );
-                sessions.lock().await.remove(&session_id);
-                emit_terminal(&app, &session_id, "closed", "SSH session closed");
-                return;
-            }
+            Ok(client::KeyboardInteractiveAuthResponse::Success) => break true,
+            Ok(client::KeyboardInteractiveAuthResponse::Failure { .. }) => break false,
             Ok(client::KeyboardInteractiveAuthResponse::InfoRequest {
                 name,
                 instructions,
@@ -675,8 +791,41 @@ async fn run_ssh_keyboard_interactive_auth(
                 emit_terminal(
                     &app,
                     &session_id,
+                    "info",
+                    format!("Keyboard-interactive authentication is unavailable: {error}"),
+                );
+                break false;
+            }
+        }
+    };
+
+    if !keyboard_authenticated {
+        emit_terminal(&app, &session_id, "data", "Password: ");
+        let Some(password) = read_auth_line(&app, &session_id, &mut receiver, false).await else {
+            sessions.lock().await.remove(&session_id);
+            emit_terminal(&app, &session_id, "closed", "SSH session closed");
+            return;
+        };
+        let authenticated = handle.authenticate_password(username, password).await;
+        match authenticated {
+            Ok(result) if result.success() => {}
+            Ok(_) => {
+                emit_terminal(
+                    &app,
+                    &session_id,
                     "error",
-                    format!("SSH authentication failed: {error}"),
+                    "SSH authentication was rejected. Check the username and password.",
+                );
+                sessions.lock().await.remove(&session_id);
+                emit_terminal(&app, &session_id, "closed", "SSH session closed");
+                return;
+            }
+            Err(error) => {
+                emit_terminal(
+                    &app,
+                    &session_id,
+                    "error",
+                    format!("SSH password authentication failed: {error}"),
                 );
                 sessions.lock().await.remove(&session_id);
                 emit_terminal(&app, &session_id, "closed", "SSH session closed");
@@ -1062,5 +1211,15 @@ mod tests {
         assert!(!modern.preferred.kex.contains(&kex::DH_G1_SHA1));
         assert!(legacy.preferred.kex.contains(&kex::DH_G14_SHA1));
         assert!(legacy.preferred.kex.contains(&kex::DH_G1_SHA1));
+        assert_eq!(legacy.preferred.kex[0], kex::DH_G14_SHA1);
+    }
+
+    #[test]
+    fn legacy_kex_retry_recognises_server_error_variants() {
+        assert!(no_common_kex_algorithm("No common Kex Algorithm"));
+        assert!(no_common_kex_algorithm(
+            "no common kex algorithm: ours diffie-hellman-group17-sha512, theirs diffie-hellman-group14-sha1"
+        ));
+        assert!(no_common_kex_algorithm("No common key exchange algorithm"));
     }
 }

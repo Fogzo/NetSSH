@@ -30,6 +30,7 @@
 .theme-light input,.theme-light textarea,.theme-light select{color:#24313d}
 .theme-light .input-wrap input,.theme-light .select-wrap select{background:transparent}
 .theme-light .table-head,.theme-light .history-head,.theme-light .credential-head{background:#f2f5f7;color:#667685}
+.theme-light .device-role-pill{background:#edf3fb;color:#456b96}
 .theme-light .status-pill{background:#edf1f4}
 .theme-light .connect-button,.theme-light .secondary-button{background:#f4f7f8;border-color:#cfd9e0;color:#3e4e5c}
 .theme-light .modal-backdrop{background:rgba(46,58,68,.38)}

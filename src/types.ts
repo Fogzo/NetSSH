@@ -2,6 +2,7 @@ export type View = "workspace" | "inventory" | "topology" | "toolbox" | "snippet
 
 export type HostStatus = "online" | "warning" | "offline";
 export type ConnectionProtocol = "ssh" | "telnet" | "serial";
+export type DeviceRole = "core" | "distribution" | "access" | "router" | "firewall" | "wireless-controller" | "access-point" | "server" | "other";
 
 export interface Host {
   id: string;
@@ -9,6 +10,7 @@ export interface Host {
   address: string;
   platform: string;
   site: string;
+  deviceRole?: DeviceRole;
   status: HostStatus;
   latency: number | null;
   favorite?: boolean;

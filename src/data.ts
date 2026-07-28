@@ -2,17 +2,17 @@ import type { CommandSnippet, Host } from "./types";
 import { ciscoCommandCatalogue } from "./ciscoCommands";
 
 export const hosts: Host[] = [
-  { id: "edge-01", name: "EDGE-RTR-01", address: "10.24.0.1", platform: "Cisco IOS-XE", site: "London DC", status: "online", latency: 12, favorite: true },
-  { id: "core-01", name: "CORE-SW-01", address: "10.24.1.2", platform: "Arista EOS", site: "London DC", status: "online", latency: 8, favorite: true },
-  { id: "fw-01", name: "FW-CLUSTER-A", address: "10.24.2.10", platform: "Palo Alto", site: "London DC", status: "warning", latency: 21, favorite: true },
-  { id: "branch-07", name: "BRANCH-07-RTR", address: "10.48.7.1", platform: "Juniper JunOS", site: "Manchester", status: "online", latency: 34 },
-  { id: "dist-02", name: "DIST-SW-02", address: "10.24.1.4", platform: "Cisco NX-OS", site: "London DC", status: "offline", latency: null },
-  { id: "lab-01", name: "LAB-EVE-01", address: "192.168.50.10", platform: "Linux", site: "Network Lab", status: "online", latency: 3 },
+  { id: "edge-01", name: "EDGE-RTR-01", address: "10.24.0.1", platform: "Cisco IOS-XE", site: "London DC", deviceRole: "router", status: "online", latency: 12, favorite: true },
+  { id: "core-01", name: "CORE-SW-01", address: "10.24.1.2", platform: "Arista EOS", site: "London DC", deviceRole: "core", status: "online", latency: 8, favorite: true },
+  { id: "fw-01", name: "FW-CLUSTER-A", address: "10.24.2.10", platform: "Palo Alto", site: "London DC", deviceRole: "firewall", status: "warning", latency: 21, favorite: true },
+  { id: "branch-07", name: "BRANCH-07-RTR", address: "10.48.7.1", platform: "Juniper JunOS", site: "Manchester", deviceRole: "router", status: "online", latency: 34 },
+  { id: "dist-02", name: "DIST-SW-02", address: "10.24.1.4", platform: "Cisco NX-OS", site: "London DC", deviceRole: "distribution", status: "offline", latency: null },
+  { id: "lab-01", name: "LAB-EVE-01", address: "192.168.50.10", platform: "Linux", site: "Network Lab", deviceRole: "server", status: "online", latency: 3 },
 ];
 
 export const ciscoDemoHosts: Host[] = [
-  { id: "demo-cisco-iosxe", name: "DEMO-C9300-01", address: "sandbox-iosxe.local", platform: "Cisco IOS-XE", site: "Test Lab", status: "online", latency: 1, favorite: true, protocol: "ssh", username: "demo", tags: ["demo", "cisco", "switch"], demoProfile: "cisco-iosxe" },
-  { id: "demo-cisco-nxos", name: "DEMO-N9K-01", address: "sandbox-nxos.local", platform: "Cisco NX-OS", site: "Test Lab", status: "online", latency: 1, protocol: "ssh", username: "demo", tags: ["demo", "cisco", "datacenter"], demoProfile: "cisco-nxos" },
+  { id: "demo-cisco-iosxe", name: "DEMO-C9300-01", address: "sandbox-iosxe.local", platform: "Cisco IOS-XE", site: "Test Lab", deviceRole: "access", status: "online", latency: 1, favorite: true, protocol: "ssh", username: "demo", tags: ["demo", "cisco", "switch"], demoProfile: "cisco-iosxe" },
+  { id: "demo-cisco-nxos", name: "DEMO-N9K-01", address: "sandbox-nxos.local", platform: "Cisco NX-OS", site: "Test Lab", deviceRole: "core", status: "online", latency: 1, protocol: "ssh", username: "demo", tags: ["demo", "cisco", "datacenter"], demoProfile: "cisco-nxos" },
 ];
 
 export const recentCommands = [

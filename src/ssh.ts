@@ -15,6 +15,22 @@ export interface TerminalEvent {
   data: string;
 }
 
+export interface SerialPortInfo {
+  name: string;
+  portType: string;
+  displayName: string;
+  manufacturer: string | null;
+  product: string | null;
+  serialNumber: string | null;
+  vendorId: number | null;
+  productId: number | null;
+}
+
+export async function listSerialPorts(): Promise<SerialPortInfo[]> {
+  if (!isTauri()) return [];
+  return invoke<SerialPortInfo[]>("list_serial_ports");
+}
+
 export async function probeSshHostKey(target: string, port: number): Promise<{ fingerprint: string; legacyRsa: boolean; legacyKex: boolean }> {
   return invoke<{ fingerprint: string; legacyRsa: boolean; legacyKex: boolean }>("probe_ssh_host_key", { target, port });
 }

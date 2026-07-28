@@ -5,9 +5,9 @@ import "./styles.css";
 import "./features.css";
 import "./interaction.css";
 import "./themes.css";
-import "./readability.css";
 import "./terminal.css";
 import "./topology.css";
+import "./readability.css";
 import "@xterm/xterm/css/xterm.css";
 import { createId } from "./id";
 

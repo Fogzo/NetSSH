@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import {
@@ -13,7 +14,7 @@ import { ciscoDemoHosts, hosts as initialHosts, recentCommands, snippets } from 
 import { calculateSubnet, type SubnetResult } from "./network";
 import { runDiagnostic, type DiagnosticKind, type DiagnosticResult } from "./diagnostics";
 import { openWifiPrivacySettings, runWifiDiagnostic, signalHealth, type WifiDiagnostic } from "./wifi";
-import { closeTerminal, listenForTerminalEvents, preflightConnection, probeSshHostKey, resizeTerminal, startTerminalSession, writeTerminal, writeTerminalEnablePassword } from "./ssh";
+import { closeTerminal, listSerialPorts, listenForTerminalEvents, preflightConnection, probeSshHostKey, resizeTerminal, startTerminalSession, writeTerminal, writeTerminalEnablePassword, type SerialPortInfo } from "./ssh";
 import { deleteCredentialEnablePassword, deleteCredentialPassword, deleteDevicePassword, hasCredentialEnablePassword, hasCredentialPassword, hasDevicePassword, isNativeApp, saveCredentialEnablePassword, saveCredentialPassword } from "./credentials";
 import { readClipboardText, writeClipboardText } from "./clipboard";
 import { createSwitchAuditCsv, runLiveSwitchAudit, type LiveSwitchAudit } from "./switchAudit";
@@ -21,7 +22,7 @@ import { createNetSshExport, createSessionCsv, decodeSessionFile, parseSessionIm
 import { TopologyDesigner } from "./TopologyDesigner";
 import { fetchSecurityAdvisories, openSecurityAdvisory, securityFeedFallback, type SecurityAdvisory } from "./securityFeed";
 import { findCiscoCommandSuggestions, type CiscoCommandSuggestion } from "./ciscoCommands";
-import type { AiMessage, AiProvider, CommandSnippet, ConnectionHistory, ConnectionProtocol, CredentialProfile, Host, Session, TerminalLine, View } from "./types";
+import type { AiMessage, AiProvider, CommandSnippet, ConnectionHistory, ConnectionProtocol, CredentialProfile, DeviceRole, Host, Session, TerminalLine, View } from "./types";
 
 const navItems: { id: View; label: string; icon: typeof TerminalSquare }[] = [
   { id: "workspace", label: "Workspace", icon: TerminalSquare },
@@ -42,6 +43,26 @@ const defaultPlatforms = ["Cisco IOS-XE", "Cisco NX-OS", "Arista EOS", "Juniper 
 const defaultSites = [...new Set(initialHosts.map((host) => host.site))].sort();
 const defaultPreferences: AppPreferences = { appearance: "dark", compactWorkspace: false, showConnectionWarnings: true, cliAutocomplete: true, defaultProtocol: "ssh", sites: defaultSites, platforms: defaultPlatforms };
 const defaultUserProfile: UserProfile = { name: "", role: "Network Engineer", onboardingComplete: false };
+const deviceRoleLabels: Record<DeviceRole, string> = { core: "Core", distribution: "Distribution", access: "Access", router: "Router", firewall: "Firewall", "wireless-controller": "WLC", "access-point": "Access point", server: "Server", other: "Other" };
+const deviceRoles = Object.entries(deviceRoleLabels) as [DeviceRole, string][];
+
+function deviceRoleValue(host: Host): DeviceRole {
+  if (host.deviceRole) return host.deviceRole;
+  const value = `${host.name} ${host.platform} ${(host.tags ?? []).join(" ")}`.toLowerCase();
+  if (value.includes("firewall") || /(^|\W)fw(\W|$)/.test(value)) return "firewall";
+  if (value.includes("wireless") || value.includes("wlc")) return "wireless-controller";
+  if (value.includes("access point") || /(^|\W)ap(\W|$)/.test(value)) return "access-point";
+  if (value.includes("router") || /(^|\W)rtr(\W|$)/.test(value)) return "router";
+  if (value.includes("core")) return "core";
+  if (value.includes("dist")) return "distribution";
+  if (value.includes("access")) return "access";
+  if (value.includes("server") || value.includes("linux")) return "server";
+  return "other";
+}
+
+function deviceRoleLabel(host: Host) {
+  return deviceRoleLabels[deviceRoleValue(host)];
+}
 
 function profileInitials(name: string) {
   const parts = name.trim().split(/\s+/).filter(Boolean);
@@ -129,6 +150,10 @@ function App() {
     try { return { ...defaultPreferences, ...JSON.parse(localStorage.getItem("netssh.preferences") ?? "{}") }; }
     catch { return defaultPreferences; }
   });
+  useEffect(() => {
+    if (!isNativeApp()) return;
+    requestAnimationFrame(() => { void invoke("complete_startup").catch(() => undefined); });
+  }, []);
   const [userProfile, setUserProfile] = useState<UserProfile>(() => {
     try { return { ...defaultUserProfile, ...JSON.parse(localStorage.getItem("netssh.userProfile") ?? "{}") }; }
     catch { return defaultUserProfile; }
@@ -216,7 +241,7 @@ function App() {
         }
         credentialId = profile.id;
       }
-      nextHosts.push({ id: `imported-${crypto.randomUUID()}`, name: item.name, address: item.address, protocol: item.protocol, port, baudRate: item.baudRate, credentialId, platform: item.platform ?? "Other", site: item.site ?? `Imported / ${source}`, status: "online", latency: null, tags: [...new Set([...(item.tags ?? []), "imported"])], notes: `Imported from ${source}` });
+      nextHosts.push({ id: `imported-${crypto.randomUUID()}`, name: item.name, address: item.address, protocol: item.protocol, port, baudRate: item.baudRate, credentialId, platform: item.platform ?? "Other", deviceRole: item.deviceRole ?? "other", site: item.site ?? `Imported / ${source}`, status: "online", latency: null, tags: [...new Set([...(item.tags ?? []), "imported"])], notes: `Imported from ${source}` });
       added += 1;
     }
     setCredentialProfiles(nextProfiles);
@@ -254,7 +279,7 @@ function App() {
         }
         trustedFingerprint = fingerprint;
       }
-      setSessions((current) => current.map((session) => session.id === id ? { ...session, lines: [...session.lines, { kind: "info", text: protocol === "serial" ? `Opening ${host.address} at ${host.baudRate ?? 9600} baud…` : protocol === "telnet" && !username ? `Connected to ${host.address}:${port}; enter credentials when prompted…` : `Authenticating ${username}@${host.address}:${port} over ${protocol.toUpperCase()}…` }, ...(protocol === "telnet" ? [{ kind: "warning" as const, text: "Telnet credentials and session traffic are not encrypted. Use only on a trusted management network." }] : []), ...(legacyKex ? [{ kind: "warning" as const, text: "Compatibility mode: this device requires a legacy SHA-1 key exchange. Upgrade its SSH configuration when possible." }] : [])] } : session));
+      setSessions((current) => current.map((session) => session.id === id ? { ...session, lines: [...session.lines, { kind: "info", text: protocol === "serial" ? `Opening ${host.address} at ${host.baudRate ?? 9600} baud…` : protocol === "ssh" && !username ? `SSH transport ready for ${host.address}:${port}; enter login details in the terminal…` : protocol === "telnet" && !username ? `Connected to ${host.address}:${port}; enter credentials when prompted…` : `Authenticating ${username}@${host.address}:${port} over ${protocol.toUpperCase()}…` }, ...(protocol === "telnet" ? [{ kind: "warning" as const, text: "Telnet credentials and session traffic are not encrypted. Use only on a trusted management network." }] : []), ...(legacyKex ? [{ kind: "warning" as const, text: "Compatibility mode: this device requires a legacy SHA-1 key exchange. Upgrade its SSH configuration when possible." }] : [])] } : session));
       await startTerminalSession({ sessionId: id, deviceId: host.id, credentialId: assignedCredential?.id, protocol, target: host.address, port, baudRate: host.baudRate, username, password, trustedFingerprint, legacyRsa, legacyKex });
       setHistory((current) => [{ id: crypto.randomUUID(), deviceId: host.id, deviceName: host.name, protocol, address: host.address, startedAt: Date.now(), success: true, detail: `${protocol.toUpperCase()} session connected` }, ...current].slice(0, 250));
       return id;
@@ -287,20 +312,6 @@ function App() {
       if (isNativeApp()) {
         const assignedCredential = credentialProfiles.find((credential) => credential.id === host.credentialId);
         const connectionUsername = assignedCredential?.username.trim() ?? host.username?.trim() ?? "";
-        if (protocol === "ssh") {
-          const passwordStored = await Promise.race([
-            assignedCredential
-              ? hasCredentialPassword(assignedCredential.id).catch(() => false)
-              : hasDevicePassword(host.id).catch(() => false),
-            new Promise<false>((resolve) => window.setTimeout(() => resolve(false), 2000)),
-          ]);
-          if (!connectionUsername || !passwordStored) {
-            setSessions((current) => [...current, { id, host, connected: false, connectionState: "awaiting-credentials", suggestedUsername: connectionUsername, lines: [{ kind: "info", text: `SSH authentication is required before ${host.name} can open a device shell.` }] }]);
-            setActiveSession(id);
-            setView("workspace");
-            return id;
-          }
-        }
         setSessions((current) => [...current, { id, host, connected: false, connectionState: "connecting", lines: [] }]);
         setActiveSession(id);
         setView("workspace");
@@ -769,7 +780,7 @@ function WorkspaceHome({ hosts, userName, onConnect, onAddDevice, onShowInventor
 }
 
 function DeviceCard({ host, onConnect, onFavorite }: { host: Host; onConnect: (host: Host) => void; onFavorite?: (id: string) => void }) {
-  return <button className="device-card" onClick={() => onConnect(host)}><div className="device-top"><span className="device-icon"><Router size={20} /></span><Star size={15} role={onFavorite ? "button" : undefined} tabIndex={onFavorite ? 0 : undefined} aria-label={host.favorite ? `Remove ${host.name} from favourites` : `Add ${host.name} to favourites`} className={host.favorite ? "starred" : ""} onClick={(event) => { if (!onFavorite) return; event.stopPropagation(); onFavorite(host.id); }} onKeyDown={(event) => { if (onFavorite && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); event.stopPropagation(); onFavorite(host.id); } }} /></div><strong>{host.name}</strong><code>{host.address}</code><div className="device-meta"><span className={`device-state ${host.status}`} />{statusLabel[host.status]}<span>·</span>{host.latency ? `${host.latency} ms` : "No response"}</div><div className="device-footer"><span>{host.platform} · {(host.protocol ?? "ssh").toUpperCase()}</span><ChevronRight size={15} /></div></button>;
+  return <button className="device-card" onClick={() => onConnect(host)}><div className="device-top"><span className="device-icon"><Router size={20} /></span><Star size={15} role={onFavorite ? "button" : undefined} tabIndex={onFavorite ? 0 : undefined} aria-label={host.favorite ? `Remove ${host.name} from favourites` : `Add ${host.name} to favourites`} className={host.favorite ? "starred" : ""} onClick={(event) => { if (!onFavorite) return; event.stopPropagation(); onFavorite(host.id); }} onKeyDown={(event) => { if (onFavorite && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); event.stopPropagation(); onFavorite(host.id); } }} /></div><strong>{host.name}</strong><code>{host.address}</code><div className="device-meta"><span className={`device-state ${host.status}`} />{statusLabel[host.status]}<span>·</span>{host.latency ? `${host.latency} ms` : "No response"}</div><div className="device-footer"><span>{deviceRoleLabel(host)} · {host.platform} · {(host.protocol ?? "ssh").toUpperCase()}</span><ChevronRight size={15} /></div></button>;
 }
 
 function Metric({ icon: Icon, value, label, trend, warning }: { icon: typeof Gauge; value: string; label: string; trend: string; warning?: boolean }) {
@@ -985,14 +996,15 @@ function Inventory({ hosts, onConnect, onAdd, onTransfer, onEdit, onFavorite, on
   const [query, setQuery] = useState("");
   const [site, setSite] = useState("all");
   const [status, setStatus] = useState<"all" | Host["status"]>("all");
+  const [role, setRole] = useState<"all" | DeviceRole>("all");
   const [pendingDelete, setPendingDelete] = useState<Host | null>(null);
   const sites = [...new Set(hosts.map((host) => host.site))].sort();
   const filtered = hosts.filter((host) => {
-    const matchesQuery = `${host.name} ${host.address} ${host.platform} ${host.site} ${(host.tags ?? []).join(" ")}`.toLowerCase().includes(query.toLowerCase());
-    return matchesQuery && (site === "all" || host.site === site) && (status === "all" || host.status === status);
+    const matchesQuery = `${host.name} ${host.address} ${host.platform} ${host.site} ${deviceRoleLabel(host)} ${(host.tags ?? []).join(" ")}`.toLowerCase().includes(query.toLowerCase());
+    return matchesQuery && (site === "all" || host.site === site) && (status === "all" || host.status === status) && (role === "all" || deviceRoleValue(host) === role);
   });
-  const resetFilters = () => { setQuery(""); setSite("all"); setStatus("all"); };
-  return <div className="page"><div className="page-intro"><div><h2>All devices</h2><p>Your complete network inventory in one place.</p></div><div className="inventory-page-actions"><button className="secondary-button" onClick={onTransfer}><FileUp size={16} /> Import / export</button><button className="primary-button" onClick={onAdd}><Plus size={17} /> Add device</button></div></div><div className="filter-bar"><div className="input-wrap"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search by name, IP, vendor, site, or tag" /></div><div className="select-wrap"><select aria-label="Filter by site" value={site} onChange={(event) => setSite(event.target.value)}><option value="all">All sites</option>{sites.map((value) => <option key={value} value={value}>{value}</option>)}</select><ChevronDown size={14} /></div><div className="select-wrap"><select aria-label="Filter by status" value={status} onChange={(event) => setStatus(event.target.value as typeof status)}><option value="all">All statuses</option><option value="online">Reachable</option><option value="warning">Attention</option><option value="offline">Offline</option></select><ChevronDown size={14} /></div></div><div className="inventory-summary"><span>{filtered.length} of {hosts.length} devices</span>{(query || site !== "all" || status !== "all") && <button onClick={resetFilters}><X size={12} /> Clear filters</button>}</div><section className="inventory-table"><div className="table-row table-head"><span>Device</span><span>Address</span><span>Platform</span><span>Site</span><span>Status</span><span /></div>{filtered.map((host) => <div className="table-row" key={host.id}><span className="table-device"><span className="device-icon"><Router size={18} /></span><span><strong>{host.name}</strong><small>{(host.protocol ?? "ssh").toUpperCase()} · {host.protocol === "serial" ? `${host.address} @ ${host.baudRate ?? 9600}` : `${host.username ? `${host.username}@` : ""}${host.address}:${host.port ?? (host.protocol === "telnet" ? 23 : 22)}`}</small></span></span><code>{host.address}</code><span>{host.platform}</span><span>{host.site}</span><span className={`status-pill ${host.status}`}><i />{statusLabel[host.status]}</span><span className="row-actions"><button className="delete-device favorite-device" aria-label={host.favorite ? `Remove ${host.name} from favourites` : `Add ${host.name} to favourites`} onClick={() => onFavorite(host.id)}><Star size={14} className={host.favorite ? "starred" : ""} /></button><button className="delete-device" aria-label={`Edit ${host.name}`} onClick={() => onEdit(host)}><Pencil size={14} /></button><button className="connect-button" disabled={host.status === "offline"} onClick={() => onConnect(host)}>Connect <ChevronRight size={14} /></button><button className="delete-device" aria-label={`Delete ${host.name}`} onClick={() => setPendingDelete(host)}><Trash2 size={14} /></button></span></div>)}{filtered.length === 0 && <div className="empty-inventory"><Search size={24} /><strong>No devices found</strong><span>Change the filters or add a new device.</span><button className="secondary-button" onClick={resetFilters}>Reset filters</button></div>}</section>{pendingDelete && <ConfirmModal title={`Remove ${pendingDelete.name}?`} message="This removes the device assignment but leaves reusable login profiles untouched. Existing terminal sessions remain open." confirmLabel="Remove device" onCancel={() => setPendingDelete(null)} onConfirm={() => { onDelete(pendingDelete.id); setPendingDelete(null); }} />}</div>;
+  const resetFilters = () => { setQuery(""); setSite("all"); setStatus("all"); setRole("all"); };
+  return <div className="page"><div className="page-intro"><div><h2>All devices</h2><p>Your complete network inventory in one place.</p></div><div className="inventory-page-actions"><button className="secondary-button" onClick={onTransfer}><FileUp size={16} /> Import / export</button><button className="primary-button" onClick={onAdd}><Plus size={17} /> Add device</button></div></div><div className="filter-bar"><div className="input-wrap"><Search size={16} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search by name, IP, role, vendor, site, or tag" /></div><div className="select-wrap"><select aria-label="Filter by device role" value={role} onChange={(event) => setRole(event.target.value as typeof role)}><option value="all">All device roles</option>{deviceRoles.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select><ChevronDown size={14} /></div><div className="select-wrap"><select aria-label="Filter by site" value={site} onChange={(event) => setSite(event.target.value)}><option value="all">All sites</option>{sites.map((value) => <option key={value} value={value}>{value}</option>)}</select><ChevronDown size={14} /></div><div className="select-wrap"><select aria-label="Filter by status" value={status} onChange={(event) => setStatus(event.target.value as typeof status)}><option value="all">All statuses</option><option value="online">Reachable</option><option value="warning">Attention</option><option value="offline">Offline</option></select><ChevronDown size={14} /></div></div><div className="inventory-summary"><span>{filtered.length} of {hosts.length} devices</span>{(query || role !== "all" || site !== "all" || status !== "all") && <button onClick={resetFilters}><X size={12} /> Clear filters</button>}</div><section className="inventory-table"><div className="table-row table-head"><span>Device</span><span>Address</span><span>Role</span><span>Platform</span><span>Site</span><span>Status</span><span /></div>{filtered.map((host) => <div className="table-row" key={host.id}><span className="table-device"><span className="device-icon"><Router size={18} /></span><span><strong>{host.name}</strong><small>{(host.protocol ?? "ssh").toUpperCase()} · {host.protocol === "serial" ? `${host.address} @ ${host.baudRate ?? 9600}` : `${host.username ? `${host.username}@` : ""}${host.address}:${host.port ?? (host.protocol === "telnet" ? 23 : 22)}`}</small></span></span><code>{host.address}</code><span className="device-role-pill">{deviceRoleLabel(host)}</span><span>{host.platform}</span><span>{host.site}</span><span className={`status-pill ${host.status}`}><i />{statusLabel[host.status]}</span><span className="row-actions"><button className="delete-device favorite-device" aria-label={host.favorite ? `Remove ${host.name} from favourites` : `Add ${host.name} to favourites`} onClick={() => onFavorite(host.id)}><Star size={14} className={host.favorite ? "starred" : ""} /></button><button className="delete-device" aria-label={`Edit ${host.name}`} onClick={() => onEdit(host)}><Pencil size={14} /></button><button className="connect-button" disabled={host.status === "offline"} onClick={() => onConnect(host)}>Connect <ChevronRight size={14} /></button><button className="delete-device" aria-label={`Delete ${host.name}`} onClick={() => setPendingDelete(host)}><Trash2 size={14} /></button></span></div>)}{filtered.length === 0 && <div className="empty-inventory"><Search size={24} /><strong>No devices found</strong><span>Change the filters or add a new device.</span><button className="secondary-button" onClick={resetFilters}>Reset filters</button></div>}</section>{pendingDelete && <ConfirmModal title={`Remove ${pendingDelete.name}?`} message="This removes the device assignment but leaves reusable login profiles untouched. Existing terminal sessions remain open." confirmLabel="Remove device" onCancel={() => setPendingDelete(null)} onConfirm={() => { onDelete(pendingDelete.id); setPendingDelete(null); }} />}</div>;
 }
 
 function SessionTransferModal({ hosts, credentialProfiles, configuredSites, onClose, onImport, notify }: { hosts: Host[]; credentialProfiles: CredentialProfile[]; configuredSites: string[]; onClose: () => void; onImport: (sessions: ImportedSession[], source: string) => { added: number; duplicates: number; profiles: number }; notify: (message: string) => void }) {
@@ -1217,12 +1229,32 @@ function AddDeviceModal({ existingHosts, credentialProfiles, initialHost, defaul
   const [baudRate, setBaudRate] = useState(String(initialHost?.baudRate ?? 9600));
   const [credentialId, setCredentialId] = useState(initialHost?.credentialId ?? "");
   const [platform, setPlatform] = useState(initialHost?.platform ?? configuredPlatforms[0] ?? "Other");
+  const [deviceRole, setDeviceRole] = useState<DeviceRole>(initialHost ? deviceRoleValue(initialHost) : "other");
   const [site, setSite] = useState(initialHost?.site ?? "");
   const [tags, setTags] = useState((initialHost?.tags ?? []).join(", "));
   const [notes, setNotes] = useState(initialHost?.notes ?? "");
   const [error, setError] = useState("");
+  const [serialPorts, setSerialPorts] = useState<SerialPortInfo[]>([]);
+  const [serialLoading, setSerialLoading] = useState(false);
+  const [serialError, setSerialError] = useState("");
+  const [manualSerial, setManualSerial] = useState(Boolean(initialHost?.protocol === "serial" && initialHost.address));
   const platformOptions = [...new Set([...configuredPlatforms, initialHost?.platform, platform].filter((value): value is string => Boolean(value)))];
   const siteOptions = [...new Set([...configuredSites, ...existingHosts.map((host) => host.site), initialHost?.site].filter((value): value is string => Boolean(value)))].sort();
+  const refreshSerialPorts = async () => {
+    setSerialLoading(true);
+    setSerialError("");
+    try {
+      const ports = await listSerialPorts();
+      setSerialPorts(ports);
+      const savedPortDetected = ports.some((serialPort) => serialPort.name === address);
+      if (savedPortDetected) setManualSerial(false);
+      else if (!address && ports[0]) { setAddress(ports[0].name); setManualSerial(false); }
+      else if (address) setManualSerial(true);
+    }
+    catch (caught) { setSerialError(String(caught).replace(/^Error:\s*/, "")); }
+    finally { setSerialLoading(false); }
+  };
+  useEffect(() => { if (protocol === "serial") void refreshSerialPorts(); }, [protocol]);
   const submit = (event: FormEvent) => {
     event.preventDefault();
     const cleanName = name.trim();
@@ -1242,6 +1274,7 @@ function AddDeviceModal({ existingHosts, credentialProfiles, initialHost, defaul
       username: undefined,
       credentialId: protocol === "serial" ? undefined : credentialId || undefined,
       platform,
+      deviceRole,
       site: site.trim(),
       status: initialHost?.status ?? "online",
       latency: initialHost?.latency ?? null,
@@ -1251,7 +1284,7 @@ function AddDeviceModal({ existingHosts, credentialProfiles, initialHost, defaul
     });
   };
   const changeProtocol = (next: ConnectionProtocol) => { setProtocol(next); if (next === "ssh" && port === "23") setPort("22"); if (next === "telnet" && port === "22") setPort("23"); };
-  return <div className="modal-backdrop" onMouseDown={onClose}><section className="device-modal" onMouseDown={(event) => event.stopPropagation()}><div className="provider-modal-head"><div><span><Router size={18} /></span><div><h3>{initialHost ? `Edit ${initialHost.name}` : "Add a network device"}</h3><p>Create a reusable SSH, Telnet, or Serial connection profile.</p></div></div><button onClick={onClose}><X size={17} /></button></div><form className="device-form" onSubmit={submit}><div className="protocol-selector">{(["ssh", "telnet", "serial"] as ConnectionProtocol[]).map((value) => <button type="button" className={protocol === value ? "active" : ""} onClick={() => changeProtocol(value)} key={value}><Radio size={14} />{value.toUpperCase()}</button>)}</div><div className="form-grid"><label><span>Device name *</span><input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="CORE-SW-03" /></label><label><span>Platform</span><select value={platform} onChange={(event) => setPlatform(event.target.value)}>{platformOptions.map((value) => <option key={value} value={value}>{value}</option>)}</select></label><label className="wide-field"><span>{protocol === "serial" ? "Serial port *" : "Hostname or IP address *"}</span><input value={address} onChange={(event) => setAddress(event.target.value)} placeholder={protocol === "serial" ? "/dev/cu.usbserial-110 or COM3" : "10.24.1.5 or switch.example.net"} /></label>{protocol === "serial" ? <label><span>Baud rate</span><select value={baudRate} onChange={(event) => setBaudRate(event.target.value)}>{[9600, 19200, 38400, 57600, 115200].map((rate) => <option value={rate} key={rate}>{rate}</option>)}</select></label> : <><label><span>{protocol.toUpperCase()} port</span><input inputMode="numeric" value={port} onChange={(event) => setPort(event.target.value)} /></label><label><span>Saved login</span><select value={credentialId} onChange={(event) => setCredentialId(event.target.value)}><option value="">Ask when connecting</option>{credentialProfiles.map((credential) => <option value={credential.id} key={credential.id}>{credential.label} · {credential.username}</option>)}</select></label></>}<label><span>Site *</span><select value={site} onChange={(event) => setSite(event.target.value)}><option value="" disabled>Select a site</option>{siteOptions.map((value) => <option key={value} value={value}>{value}</option>)}</select></label><label><span>Tags</span><input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="core, production" /></label><label className="wide-field"><span>Notes</span><textarea value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Circuit ID, rack, support details…" rows={3} /></label></div>{error && <div className="modal-error">{error}</div>}<div className="form-security"><ShieldCheck size={15} /><span>Choose a named login from the Credential vault, or ask for credentials each time you connect.</span></div><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button">{initialHost ? <Pencil size={15} /> : <Plus size={15} />} {initialHost ? "Save changes" : "Add device"}</button></div></form></section></div>;
+  return <div className="modal-backdrop" onMouseDown={onClose}><section className="device-modal" onMouseDown={(event) => event.stopPropagation()}><div className="provider-modal-head"><div><span><Router size={18} /></span><div><h3>{initialHost ? `Edit ${initialHost.name}` : "Add a network device"}</h3><p>Create a reusable SSH, Telnet, or Serial connection profile.</p></div></div><button onClick={onClose}><X size={17} /></button></div><form className="device-form" onSubmit={submit}><div className="protocol-selector">{(["ssh", "telnet", "serial"] as ConnectionProtocol[]).map((value) => <button type="button" className={protocol === value ? "active" : ""} onClick={() => changeProtocol(value)} key={value}><Radio size={14} />{value.toUpperCase()}</button>)}</div><div className="form-grid"><label><span>Device name *</span><input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="CORE-SW-03" /></label><label><span>Device role</span><select value={deviceRole} onChange={(event) => setDeviceRole(event.target.value as DeviceRole)}>{deviceRoles.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label><label><span>Platform</span><select value={platform} onChange={(event) => setPlatform(event.target.value)}>{platformOptions.map((value) => <option key={value} value={value}>{value}</option>)}</select></label><label><span>Site *</span><select value={site} onChange={(event) => setSite(event.target.value)}><option value="" disabled>Select a site</option>{siteOptions.map((value) => <option key={value} value={value}>{value}</option>)}</select></label>{protocol === "serial" ? <div className="wide-field serial-port-field"><span>Serial port *</span><div className="serial-port-picker">{manualSerial ? <input value={address} onChange={(event) => setAddress(event.target.value)} placeholder="COM3 or /dev/cu.usbserial-110" autoFocus /> : <select value={address} onChange={(event) => { if (event.target.value === "__manual__") { setAddress(""); setManualSerial(true); } else setAddress(event.target.value); }} disabled={serialLoading}><option value="">{serialLoading ? "Detecting serial ports…" : serialPorts.length ? "Select a serial port" : "No serial ports detected"}</option>{serialPorts.map((serialPort) => <option value={serialPort.name} key={serialPort.name}>{serialPort.displayName}</option>)}<option value="__manual__">Enter port manually…</option></select>}<button type="button" className="serial-refresh" onClick={() => { setManualSerial(false); void refreshSerialPorts(); }} disabled={serialLoading} title="Refresh detected serial ports"><RefreshCw size={15} className={serialLoading ? "spin" : ""} /></button></div>{serialError && <small className="serial-port-error">{serialError}</small>}{!serialError && !serialLoading && <small>{serialPorts.length ? `${serialPorts.length} serial ${serialPorts.length === 1 ? "port" : "ports"} detected by the operating system.` : "Connect a USB console adapter, then refresh or enter its port manually."}</small>}</div> : <label className="wide-field"><span>Hostname or IP address *</span><input value={address} onChange={(event) => setAddress(event.target.value)} placeholder="10.24.1.5 or switch.example.net" /></label>}{protocol === "serial" ? <label><span>Baud rate</span><select value={baudRate} onChange={(event) => setBaudRate(event.target.value)}>{[9600, 19200, 38400, 57600, 115200].map((rate) => <option value={rate} key={rate}>{rate}</option>)}</select></label> : <><label><span>{protocol.toUpperCase()} port</span><input inputMode="numeric" value={port} onChange={(event) => setPort(event.target.value)} /></label><label><span>Saved login</span><select value={credentialId} onChange={(event) => setCredentialId(event.target.value)}><option value="">Prompt in terminal</option>{credentialProfiles.map((credential) => <option value={credential.id} key={credential.id}>{credential.label} · {credential.username}</option>)}</select></label></>}<label><span>Tags</span><input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="core, production" /></label><label className="wide-field"><span>Notes</span><textarea value={notes} onChange={(event) => setNotes(event.target.value)} placeholder="Circuit ID, rack, support details…" rows={3} /></label></div>{error && <div className="modal-error">{error}</div>}<div className="form-security"><ShieldCheck size={15} /><span>Assigned vault logins connect automatically. Without one, NetSSH prompts for SSH details inside the terminal workspace.</span></div><div className="modal-actions"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button">{initialHost ? <Pencil size={15} /> : <Plus size={15} />} {initialHost ? "Save changes" : "Add device"}</button></div></form></section></div>;
 }
 
 function ConfirmModal({ title, message, confirmLabel, onCancel, onConfirm }: { title: string; message: string; confirmLabel: string; onCancel: () => void; onConfirm: () => void }) {
