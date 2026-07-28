@@ -36,4 +36,6 @@ small{font-size:11px!important;line-height:1.45}
 .profile-menu small,.session-menu small,.picker-devices small,.palette-body small,.welcome-devices small,.advisory-copy small{font-size:10px!important}
 .config-chips>span,.config-add input,.config-add button,.native-badge,.assignment-row,.assignment-row select,.transfer-tabs button,.transfer-format label>span,.transfer-content>span,.transfer-file strong,.transfer-help,.export-option small,.export-option em,.pane-heading,.pane-session-select select,.session-picker,.picker-footer,.command-palette,.palette-footer,.wifi-refresh,.wifi-section-title,.nearby-head,.security-feed-note{font-size:11px!important}
 .credential-secret-note,.transfer-preview span,.transfer-preview p,.export-summary span,.serial-port-field>small{font-size:11px!important}
+.audit-controls label>span,.audit-controls select,.audit-controls input,.audit-controls em,.live-audit-run>span,.live-audit-password label,.audit-summary span,.audit-result-head,.audit-row,.audit-warning,.audit-method,.audit-empty span{font-size:11px!important}
+.audit-head{font-size:10px!important}.audit-row code,.audit-row span,.audit-method strong,.audit-empty strong{font-size:12px!important}.audit-summary strong{font-size:16px!important}
 @media(max-width:760px){.page{padding:18px}.page-intro h2{font-size:21px}}

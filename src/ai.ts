@@ -16,6 +16,9 @@ export async function providerIsConnected(provider: Exclude<AiProvider, "demo">)
 export async function saveProviderKey(provider: Exclude<AiProvider, "demo">, apiKey: string): Promise<void> {
   if (!isTauri()) throw new Error("Provider keys can only be saved in the native desktop app.");
   await invoke("save_ai_key", { provider, apiKey });
+  if (!await providerIsConnected(provider)) {
+    throw new Error("The operating-system vault did not return the saved API key. Try saving it again.");
+  }
 }
 
 export async function removeProviderKey(provider: Exclude<AiProvider, "demo">): Promise<void> {

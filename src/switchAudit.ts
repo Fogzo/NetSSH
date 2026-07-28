@@ -101,6 +101,6 @@ function csvValue(value: string | number | null) {
 
 export function createSwitchAuditCsv(audit: LiveSwitchAudit): string {
   const rows = [["Switch", "Address", "Port", "Description", "Interface status", "Line protocol", "Last input", "Approx. inactive weeks", "Protected", "Recommendation", "Reason"]];
-  audit.ports.forEach((port) => rows.push([audit.deviceName, audit.address, port.port, port.description, port.interfaceStatus, port.lineProtocol, port.lastInput, port.inactiveWeeks == null ? "" : String(port.inactiveWeeks), port.protected ? "Yes" : "No", port.candidate ? "Review for shutdown" : "Keep / investigate", port.reason]));
+  audit.ports.filter((port) => port.candidate).forEach((port) => rows.push([audit.deviceName, audit.address, port.port, port.description, port.interfaceStatus, port.lineProtocol, port.lastInput, port.inactiveWeeks == null ? "" : String(port.inactiveWeeks), "No", "Review for shutdown", port.reason]));
   return rows.map((row) => row.map(csvValue).join(",")).join("\r\n");
 }

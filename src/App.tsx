@@ -921,6 +921,7 @@ function InteractiveTerminal({ session, onData, autocompleteEnabled, autoFocus =
     resizeObserver.observe(hostRef.current);
     const dataSubscription = terminal.onData((data) => {
       if (connectedRef.current) {
+        terminal.scrollToBottom();
         if (autocompleteEnabled) {
           if (data === "\r" || data === "\n" || data === "\u0003" || data === "\u0015") inputBuffer.current = "";
           else if (data === "\u007f" || data === "\b") inputBuffer.current = inputBuffer.current.slice(0, -1);
@@ -978,6 +979,7 @@ function InteractiveTerminal({ session, onData, autocompleteEnabled, autoFocus =
     if (!terminal) return;
     session.lines.slice(renderedLines.current).forEach((line) => writeLine(terminal, line));
     renderedLines.current = session.lines.length;
+    terminal.scrollToBottom();
   }, [session.lines]);
 
   useEffect(() => {
@@ -1108,6 +1110,13 @@ function Toolbox({ hosts, credentialProfiles, notify }: { hosts: Host[]; credent
     event?.preventDefault();
     try { setResult(calculateSubnet(cidr)); setError(""); } catch (caught) { setError((caught as Error).message); }
   };
+  const prefixValue = (() => { const value = Number(cidr.split("/").at(-1)); return Number.isInteger(value) && value >= 0 && value <= 32 ? value : 24; })();
+  const changePrefix = (prefix: number) => {
+    const address = cidr.split("/")[0]?.trim() || "0.0.0.0";
+    const nextCidr = `${address}/${prefix}`;
+    setCidr(nextCidr);
+    try { setResult(calculateSubnet(nextCidr)); setError(""); } catch (caught) { setError((caught as Error).message); }
+  };
   const copy = (value: string) => { navigator.clipboard?.writeText(value); notify("Copied to clipboard"); };
   const tools = [
     { id: "subnet" as const, icon: Calculator, label: "Subnet calculator" },
@@ -1118,7 +1127,7 @@ function Toolbox({ hosts, credentialProfiles, notify }: { hosts: Host[]; credent
     { id: "audit" as const, icon: ClipboardCheck, label: "Switch audit" },
   ];
   const toolDescription = (tool: ToolboxTool) => tool === "ping" ? "Reachability and hop path" : tool === "dns" ? "System resolver lookup" : tool === "port" ? "Timed TCP handshake" : tool === "wifi" ? "RSSI, channel and radio health" : tool === "audit" ? "Unused access-port evidence" : "Address planning";
-  return <div className="page"><div className="page-intro"><div><h2>Network toolbox</h2><p>Fast, reliable utilities built into your workflow.</p></div></div><div className="tool-tabs">{tools.map((tool) => <button key={tool.id} className={activeTool === tool.id ? "active" : ""} onClick={() => setActiveTool(tool.id)}><tool.icon size={16} /> {tool.label}</button>)}</div>{activeTool === "subnet" ? <div className="tool-grid"><section className="panel calculator-panel"><div className="panel-title"><div><h3>IPv4 subnet calculator</h3><p>Enter any address using CIDR notation</p></div><span className="tool-icon"><Calculator size={20} /></span></div><form onSubmit={calculate} className="calculator-form"><label>IP address / CIDR</label><div><input value={cidr} onChange={(event) => setCidr(event.target.value)} placeholder="192.168.1.10/24" /><button className="primary-button">Calculate</button></div>{error && <span className="form-error">{error}</span>}</form><div className="result-grid"><Result label="Network" value={result.network} copy={copy} /><Result label="Broadcast" value={result.broadcast} copy={copy} /><Result label="Subnet mask" value={result.mask} copy={copy} /><Result label="Wildcard mask" value={result.wildcard} copy={copy} /><Result label="First usable" value={result.firstHost} copy={copy} /><Result label="Last usable" value={result.lastHost} copy={copy} /></div><div className="capacity-row"><div><span>Address space</span><strong>{result.cidr}</strong></div><div><span>Usable hosts</span><strong>{result.usable.toLocaleString()}</strong></div><div><span>Total addresses</span><strong>{result.total.toLocaleString()}</strong></div><div><span>Scope</span><strong>{result.isPrivate ? "Private" : "Public"}</strong></div></div></section><aside className="tool-aside"><section className="panel"><div className="panel-title"><div><h3>Binary view</h3><p>32-bit representation</p></div></div><div className="binary-value">{result.binary.split(".").map((part, index) => <span key={index}>{part}{index < 3 && <i>.</i>}</span>)}</div></section><section className="panel quick-tools"><div className="panel-title"><div><h3>Quick tools</h3><p>Common network checks</p></div></div>{tools.slice(1).map((tool) => <button key={tool.id} onClick={() => setActiveTool(tool.id)}><span><tool.icon size={17} /></span><div><strong>{tool.label}</strong><small>{toolDescription(tool.id)}</small></div><ChevronRight size={15} /></button>)}</section></aside></div> : activeTool === "wifi" ? <WifiPanel notify={notify} /> : activeTool === "audit" ? <LiveSwitchAuditPanel hosts={hosts} credentialProfiles={credentialProfiles} notify={notify} /> : <DiagnosticPanel tool={activeTool} notify={notify} />}</div>;
+  return <div className="page"><div className="page-intro"><div><h2>Network toolbox</h2><p>Fast, reliable utilities built into your workflow.</p></div></div><div className="tool-tabs">{tools.map((tool) => <button key={tool.id} className={activeTool === tool.id ? "active" : ""} onClick={() => setActiveTool(tool.id)}><tool.icon size={16} /> {tool.label}</button>)}</div>{activeTool === "subnet" ? <div className="tool-grid"><section className="panel calculator-panel"><div className="panel-title"><div><h3>IPv4 subnet calculator</h3><p>Enter an IPv4 address, then adjust the prefix slider</p></div><span className="tool-icon"><Calculator size={20} /></span></div><form onSubmit={calculate} className="calculator-form"><label>IP address / CIDR</label><div><input value={cidr} onChange={(event) => setCidr(event.target.value)} placeholder="192.168.1.10/24" /><button className="primary-button">Calculate</button></div>{error && <span className="form-error">{error}</span>}<div className="subnet-prefix-control"><div><strong>Prefix length</strong><span>/{prefixValue} · {result.total.toLocaleString()} total addresses</span></div><input aria-label="Subnet prefix length" type="range" min="0" max="32" step="1" value={prefixValue} onChange={(event) => changePrefix(Number(event.target.value))} /><div className="subnet-prefix-scale"><span>/0</span><span>/8</span><span>/16</span><span>/24</span><span>/32</span></div></div></form><div className="result-grid"><Result label="Network" value={result.network} copy={copy} /><Result label="Broadcast" value={result.broadcast} copy={copy} /><Result label="Subnet mask" value={result.mask} copy={copy} /><Result label="Wildcard mask" value={result.wildcard} copy={copy} /><Result label="First usable" value={result.firstHost} copy={copy} /><Result label="Last usable" value={result.lastHost} copy={copy} /></div><div className="capacity-row"><div><span>Address space</span><strong>{result.cidr}</strong></div><div><span>Usable hosts</span><strong>{result.usable.toLocaleString()}</strong></div><div><span>Total addresses</span><strong>{result.total.toLocaleString()}</strong></div><div><span>Scope</span><strong>{result.isPrivate ? "Private" : "Public"}</strong></div></div></section><aside className="tool-aside"><section className="panel"><div className="panel-title"><div><h3>Binary view</h3><p>32-bit representation</p></div></div><div className="binary-value">{result.binary.split(".").map((part, index) => <span key={index}>{part}{index < 3 && <i>.</i>}</span>)}</div></section><section className="panel quick-tools"><div className="panel-title"><div><h3>Quick tools</h3><p>Common network checks</p></div></div>{tools.slice(1).map((tool) => <button key={tool.id} onClick={() => setActiveTool(tool.id)}><span><tool.icon size={17} /></span><div><strong>{tool.label}</strong><small>{toolDescription(tool.id)}</small></div><ChevronRight size={15} /></button>)}</section></aside></div> : activeTool === "wifi" ? <WifiPanel notify={notify} /> : activeTool === "audit" ? <LiveSwitchAuditPanel hosts={hosts} credentialProfiles={credentialProfiles} notify={notify} /> : <DiagnosticPanel tool={activeTool} notify={notify} />}</div>;
 }
 
 function LiveSwitchAuditPanel({ hosts, credentialProfiles, notify }: { hosts: Host[]; credentialProfiles: CredentialProfile[]; notify: (message: string) => void }) {
@@ -1156,7 +1165,7 @@ function LiveSwitchAuditPanel({ hosts, credentialProfiles, notify }: { hosts: Ho
       setAudit(result);
       if (auditPassword && saveAuditPassword) setVaultPasswordAvailable(true);
       setAuditPassword("");
-      notify(`Checked ${result.ports.length} physical interfaces on ${selectedHost.name}`);
+      notify(`Found ${result.ports.filter((port) => port.candidate).length} unused-port candidates on ${selectedHost.name}`);
     } catch (caught) { setError(String(caught)); }
     finally { setRunning(false); }
   };

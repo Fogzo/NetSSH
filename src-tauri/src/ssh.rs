@@ -499,23 +499,16 @@ pub async fn start_terminal_session(
                     .map_err(|error| format!("SSH authentication failed: {error}"))?
             };
             if !authentication.success() {
-                if password.is_none() {
-                    manager
-                        .sessions
-                        .lock()
-                        .await
-                        .insert(session_id.clone(), sender);
-                    let sessions = manager.sessions.clone();
-                    tokio::spawn(run_ssh_keyboard_interactive_auth(
-                        app, sessions, session_id, handle, receiver, username, columns, rows,
-                    ));
-                    return Ok(());
-                }
-                return Err(if password.is_some() {
-                    "SSH authentication was rejected. Check the username and password.".into()
-                } else {
-                    "This SSH server requires a password before it can open a terminal and does not offer keyboard-interactive login. Enter the password in the connection dialog.".into()
-                });
+                manager
+                    .sessions
+                    .lock()
+                    .await
+                    .insert(session_id.clone(), sender);
+                let sessions = manager.sessions.clone();
+                tokio::spawn(run_ssh_keyboard_interactive_auth(
+                    app, sessions, session_id, handle, receiver, username, password, columns, rows,
+                ));
+                return Ok(());
             }
             let channel = handle
                 .channel_open_session()
@@ -626,7 +619,7 @@ async fn run_ssh_terminal_login(
         return;
     }
     run_ssh_keyboard_interactive_auth(
-        app, sessions, session_id, handle, receiver, username, columns, rows,
+        app, sessions, session_id, handle, receiver, username, None, columns, rows,
     )
     .await;
 }
@@ -744,6 +737,7 @@ async fn run_ssh_keyboard_interactive_auth(
     mut handle: client::Handle<SshHandler>,
     mut receiver: mpsc::Receiver<TerminalAction>,
     username: String,
+    saved_password: Option<String>,
     columns: u32,
     rows: u32,
 ) {
@@ -774,6 +768,13 @@ async fn run_ssh_keyboard_interactive_auth(
                 let mut answers = Vec::with_capacity(prompts.len());
                 for prompt in prompts {
                     emit_terminal(&app, &session_id, "data", prompt.prompt);
+                    if !prompt.echo {
+                        if let Some(password) = saved_password.as_ref() {
+                            emit_terminal(&app, &session_id, "data", "\r\n");
+                            answers.push(password.clone());
+                            continue;
+                        }
+                    }
                     let Some(answer) =
                         read_auth_line(&app, &session_id, &mut receiver, prompt.echo).await
                     else {
@@ -800,11 +801,17 @@ async fn run_ssh_keyboard_interactive_auth(
     };
 
     if !keyboard_authenticated {
-        emit_terminal(&app, &session_id, "data", "Password: ");
-        let Some(password) = read_auth_line(&app, &session_id, &mut receiver, false).await else {
-            sessions.lock().await.remove(&session_id);
-            emit_terminal(&app, &session_id, "closed", "SSH session closed");
-            return;
+        let password = if let Some(password) = saved_password {
+            password
+        } else {
+            emit_terminal(&app, &session_id, "data", "Password: ");
+            let Some(password) = read_auth_line(&app, &session_id, &mut receiver, false).await
+            else {
+                sessions.lock().await.remove(&session_id);
+                emit_terminal(&app, &session_id, "closed", "SSH session closed");
+                return;
+            };
+            password
         };
         let authenticated = handle.authenticate_password(username, password).await;
         match authenticated {

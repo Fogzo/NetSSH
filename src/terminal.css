@@ -21,7 +21,7 @@
   min-height: 0;
   border-style: solid;
   border-color: #070b10;
-  border-width: 12px 14px 30px;
+  border-width: 10px 12px;
   overflow: hidden;
   background: #070b10;
 }
@@ -88,7 +88,7 @@
 }
 
 .session-pane .xterm-host {
-  border-width: 9px 10px 26px;
+  border-width: 8px 10px;
 }
 
 .terminal-actions {
@@ -188,7 +188,7 @@
 .terminal-login .terminal-login-save span { display: inline; margin: 0; }
 .terminal-login form > .primary-button { width: 100%; height: 38px; margin-top: 17px; }
 
-.terminal-shell { background: #070b10; }
+.terminal-shell { min-height:0;overflow:hidden;background:#070b10; }
 .terminal-shell > .terminal-session-info { order: 0; }
 .terminal-shell > .terminal-autocomplete { order: 1; }
 .terminal-shell > .xterm-host { order: 2; }
@@ -228,14 +228,14 @@
 @media(max-height:700px) {
   .terminal-session-info { min-height: 29px; padding-block: 3px; }
   .terminal-info-badge { height: 20px; }
-  .xterm-host { border-top-width: 7px; border-bottom-width: 26px; }
+  .xterm-host { border-width: 7px 10px; }
   .terminal-autocomplete { height:36px; padding-block:3px; }
 }
 
 @media(max-height:520px) {
   .terminal-session-info { display: none; }
   .terminal-status { height: 22px; }
-  .xterm-host { border-width: 5px 9px 24px; }
+  .xterm-host { border-width: 5px 8px; }
   .terminal-autocomplete { height:32px; padding-inline:9px; }
   .terminal-autocomplete-heading,.terminal-autocomplete button { height:26px; }
   .terminal-autocomplete em { display:none; }

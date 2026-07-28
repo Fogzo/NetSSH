@@ -274,21 +274,34 @@ fn provider_entry(provider: &str) -> Result<Entry, String> {
     Entry::new(KEYRING_SERVICE, provider).map_err(|error| error.to_string())
 }
 
+fn store_vault_secret(entry: Entry, secret: &str, label: &str) -> Result<(), String> {
+    entry.set_password(secret).map_err(|error| {
+        format!("Unable to save {label} in the operating-system vault: {error}")
+    })?;
+    let saved = entry.get_password().map_err(|error| {
+        format!("The operating-system vault did not return the saved {label}: {error}")
+    })?;
+    if saved != secret {
+        return Err(format!(
+            "The operating-system vault returned different data for the saved {label}"
+        ));
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn save_ai_key(provider: String, api_key: String) -> Result<(), String> {
     if api_key.trim().len() < 12 {
         return Err("Enter a valid provider API key".into());
     }
-    provider_entry(&provider)?
-        .set_password(api_key.trim())
-        .map_err(|error| error.to_string())
+    store_vault_secret(provider_entry(&provider)?, api_key.trim(), "API key")
 }
 
 #[tauri::command]
 fn has_ai_key(provider: String) -> bool {
     provider_entry(&provider)
         .and_then(|entry| entry.get_password().map_err(|error| error.to_string()))
-        .is_ok()
+        .is_ok_and(|key| !key.trim().is_empty())
 }
 
 #[tauri::command]
@@ -352,9 +365,11 @@ fn save_credential_password(credential_id: String, password: String) -> Result<(
     if password.is_empty() {
         return Err("Password cannot be empty".into());
     }
-    credential_entry(&credential_id)?
-        .set_password(&password)
-        .map_err(|error| error.to_string())
+    store_vault_secret(
+        credential_entry(&credential_id)?,
+        &password,
+        "login password",
+    )
 }
 
 #[tauri::command]
@@ -376,9 +391,11 @@ fn save_credential_enable_password(credential_id: String, password: String) -> R
     if password.is_empty() {
         return Err("Enable password cannot be empty".into());
     }
-    credential_enable_entry(&credential_id)?
-        .set_password(&password)
-        .map_err(|error| error.to_string())
+    store_vault_secret(
+        credential_enable_entry(&credential_id)?,
+        &password,
+        "enable password",
+    )
 }
 
 #[tauri::command]
@@ -400,9 +417,7 @@ fn save_device_password(device_id: String, password: String) -> Result<(), Strin
     if password.is_empty() {
         return Err("Password cannot be empty".into());
     }
-    device_entry(&device_id)?
-        .set_password(&password)
-        .map_err(|error| error.to_string())
+    store_vault_secret(device_entry(&device_id)?, &password, "device password")
 }
 
 #[tauri::command]
@@ -481,20 +496,22 @@ async fn ask_gemini(
     api_key: &str,
     messages: Vec<AiMessage>,
 ) -> Result<String, String> {
-    let transcript = messages
-        .iter()
-        .map(|message| format!("{}: {}", message.role, message.content))
-        .collect::<Vec<_>>()
-        .join("\n\n");
+    let contents = messages
+        .into_iter()
+        .map(|message| {
+            json!({
+                "role": if message.role == "assistant" { "model" } else { "user" },
+                "parts": [{ "text": message.content }]
+            })
+        })
+        .collect::<Vec<_>>();
     let response = client
-        .post("https://generativelanguage.googleapis.com/v1beta/interactions")
+        .post("https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent")
         .header("x-goog-api-key", api_key)
         .json(&json!({
-            "model": "gemini-3.6-flash",
-            "system_instruction": NETWORK_SYSTEM_PROMPT,
-            "input": transcript,
-            "store": false,
-            "generation_config": { "thinking_level": "low" }
+            "systemInstruction": { "parts": [{ "text": NETWORK_SYSTEM_PROMPT }] },
+            "contents": contents,
+            "generationConfig": { "temperature": 0.3 }
         }))
         .send()
         .await
