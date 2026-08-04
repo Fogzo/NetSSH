@@ -83,6 +83,8 @@ The **Topology** workspace builds diagrams from inventory devices or standalone 
 
 To package unsigned installers for a trusted testing group, use `npm run package:test:mac` on macOS or `npm run package:test:windows` on Windows. A manual GitHub Actions workflow can build both platforms. See [DISTRIBUTION.md](DISTRIBUTION.md) for artifact locations, tester delivery, signing, and notarization guidance.
 
+Published desktop builds can update themselves from GitHub Releases. Open **Settings → Application updates** to check for and install a signed release without manually downloading a new installer. Release setup and the required GitHub secret are documented in [DISTRIBUTION.md](DISTRIBUTION.md).
+
 For Windows-first testing, use the dedicated **Build Windows tester installer** GitHub Actions workflow and follow [WINDOWS_TESTING.md](WINDOWS_TESTING.md). It produces an NSIS installer with checksum and build metadata on a clean Windows runner.
 
 ## Architecture

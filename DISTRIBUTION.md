@@ -46,6 +46,28 @@ Before distributing beyond trusted testers:
 3. Store signing credentials only as protected CI secrets.
 4. Remove `--no-sign` from the packaging commands.
 5. Publish checksums with each installer and test upgrades before release.
-6. Add an updater only after release signing and update-signing key management are established.
+6. Configure the updater signing key and test an upgrade before wider distribution.
 
 Never commit certificates, private keys, signing passwords, or notarization credentials to the repository.
+
+## Automatic updates
+
+NetSSH now uses the Tauri updater with GitHub Releases as its update source. The public updater verification key is committed in `src-tauri/tauri.conf.json`; the private signing key must remain outside the repository.
+
+One-time GitHub setup:
+
+1. Generate or use the updater private key. If you generate a new key, replace the public key in `src-tauri/tauri.conf.json` before publishing any release. Never rotate this key casually because installed versions trust the existing public key.
+2. Add a repository secret named `TAURI_SIGNING_PRIVATE_KEY` containing the complete private key file.
+3. Leave `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` unset when using an unencrypted key, or add it when the private key has a password.
+4. Ensure Actions has read and write access to repository contents so it can create releases.
+
+To publish an update, bump the version in `package.json`, `src-tauri/tauri.conf.json`, and `src-tauri/Cargo.toml`, commit the change, and push a matching tag:
+
+```bash
+git tag v0.1.10
+git push origin v0.1.10
+```
+
+The `Release NetSSH` workflow builds signed updater artifacts for macOS and Windows, creates the GitHub Release, and uploads `latest.json`. Installed users can then open **Settings → Application updates → Check for updates** and install the release without manually downloading a new installer.
+
+The updater endpoint expects public GitHub Releases. If the source repository is private, publish the release assets from a separate public distribution repository or replace the endpoint with an authenticated update service.

@@ -1,9 +1,12 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { getVersion } from "@tauri-apps/api/app";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import { relaunch } from "@tauri-apps/plugin-process";
+import { check, type Update } from "@tauri-apps/plugin-updater";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import {
-  Activity, Bell, Bot, BrainCircuit, Calculator, Check, ChevronDown, ChevronRight, CircleDot, ClipboardCheck, ClipboardPaste,
+  Activity, ArrowDownCircle, Bell, Bot, BrainCircuit, Calculator, Check, ChevronDown, ChevronRight, CircleDot, ClipboardCheck, ClipboardPaste,
   Clock3, Code2, Command, Copy, Database, FileDown, FileUp, Gauge, Globe2, Grid2X2, HardDrive,
   KeyRound, Layers3, Menu, MoreHorizontal, Network, PanelLeftClose, Pencil, Plus, Rss,
   ExternalLink, Eye, EyeOff, LockKeyhole, Radio, RefreshCw, Router, Search, Send, Server, Settings, ShieldCheck, Sparkles, Star,
@@ -23,6 +26,9 @@ import { TopologyDesigner } from "./TopologyDesigner";
 import { fetchSecurityAdvisories, openSecurityAdvisory, securityFeedFallback, type SecurityAdvisory } from "./securityFeed";
 import { findCiscoCommandSuggestions, type CiscoCommandSuggestion } from "./ciscoCommands";
 import type { AiMessage, AiProvider, CommandSnippet, ConnectionHistory, ConnectionProtocol, CredentialProfile, DeviceRole, Host, Session, TerminalLine, View } from "./types";
+import packageMetadata from "../package.json";
+
+const APP_VERSION = packageMetadata.version;
 
 const navItems: { id: View; label: string; icon: typeof TerminalSquare }[] = [
   { id: "workspace", label: "Workspace", icon: TerminalSquare },
@@ -528,7 +534,7 @@ function Sidebar({ view, setView, open, setOpen, onSearch, onOpenSettings, onEdi
       </div>
       <div className="sidebar-footer">
         <div className="sync-card"><div className="sync-icon"><ShieldCheck size={17} /></div><div><strong>Local vault</strong><small>Encrypted & secure</small></div><span className="status-dot" /></div>
-        <div className="profile-wrap">{profileOpen && <div className="profile-menu"><button onClick={() => { setProfileOpen(false); onEditProfile(); }}><UserRound size={14} /><span><strong>Your profile</strong><small>Name and role</small></span></button><button onClick={() => { setProfileOpen(false); onOpenSettings(); }}><Settings size={14} /><span><strong>Preferences</strong><small>Workspace, sites, and platforms</small></span></button><button onClick={() => { setProfileOpen(false); setView("credentials"); }}><KeyRound size={14} /><span><strong>Credential vault</strong><small>Manage reusable logins</small></span></button><button onClick={() => { setProfileOpen(false); onShowOnboarding(); }}><Sparkles size={14} /><span><strong>Welcome tour</strong><small>Review the NetSSH basics</small></span></button><button onClick={() => { setProfileOpen(false); notify("NetSSH 0.1.7 · Local workspace"); }}><Network size={14} /><span><strong>About NetSSH</strong><small>Version 0.1.7</small></span></button></div>}<button className="profile" aria-label="Open profile menu" onClick={() => setProfileOpen((value) => !value)}><span className="avatar">{profileInitials(userProfile.name)}</span><span><strong>{userProfile.name || "Network Engineer"}</strong><small>{userProfile.role || "Local workspace"}</small></span><MoreHorizontal size={18} /></button></div>
+        <div className="profile-wrap">{profileOpen && <div className="profile-menu"><button onClick={() => { setProfileOpen(false); onEditProfile(); }}><UserRound size={14} /><span><strong>Your profile</strong><small>Name and role</small></span></button><button onClick={() => { setProfileOpen(false); onOpenSettings(); }}><Settings size={14} /><span><strong>Preferences</strong><small>Workspace, sites, and platforms</small></span></button><button onClick={() => { setProfileOpen(false); setView("credentials"); }}><KeyRound size={14} /><span><strong>Credential vault</strong><small>Manage reusable logins</small></span></button><button onClick={() => { setProfileOpen(false); onShowOnboarding(); }}><Sparkles size={14} /><span><strong>Welcome tour</strong><small>Review the NetSSH basics</small></span></button><button onClick={() => { setProfileOpen(false); notify(`NetSSH ${APP_VERSION} · Local workspace`); }}><Network size={14} /><span><strong>About NetSSH</strong><small>Version {APP_VERSION}</small></span></button></div>}<button className="profile" aria-label="Open profile menu" onClick={() => setProfileOpen((value) => !value)}><span className="avatar">{profileInitials(userProfile.name)}</span><span><strong>{userProfile.name || "Network Engineer"}</strong><small>{userProfile.role || "Local workspace"}</small></span><MoreHorizontal size={18} /></button></div>
       </div>
     </aside>
   );
@@ -571,9 +577,89 @@ function UserProfileModal({ profile, onboarding = false, onClose, onReset, onSav
   </form></div>;
 }
 
+type AppUpdateStatus = "idle" | "checking" | "current" | "available" | "updating" | "unsupported" | "error";
+
+function AppUpdateSection() {
+  const [version, setVersion] = useState("Loading…");
+  const [status, setStatus] = useState<AppUpdateStatus>("idle");
+  const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
+  const [error, setError] = useState("");
+  const [progress, setProgress] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (!isTauri()) {
+      setVersion("Browser preview");
+      setStatus("unsupported");
+      return;
+    }
+    getVersion().then(setVersion).catch(() => setVersion("Desktop build"));
+  }, []);
+
+  const checkForUpdates = async () => {
+    if (!isTauri()) {
+      setStatus("unsupported");
+      return;
+    }
+    setStatus("checking");
+    setError("");
+    try {
+      const update = await check();
+      setAvailableUpdate(update);
+      setStatus(update ? "available" : "current");
+    } catch (caught) {
+      setAvailableUpdate(null);
+      setError(String(caught));
+      setStatus("error");
+    }
+  };
+
+  const installUpdate = async () => {
+    if (!availableUpdate) return;
+    setStatus("updating");
+    setError("");
+    setProgress(0);
+    let downloaded = 0;
+    let contentLength = 0;
+    try {
+      await availableUpdate.downloadAndInstall((event) => {
+        if (event.event === "Started") {
+          contentLength = event.data.contentLength ?? 0;
+          setProgress(0);
+        } else if (event.event === "Progress") {
+          downloaded += event.data.chunkLength;
+          if (contentLength > 0) setProgress(Math.min(100, Math.round((downloaded / contentLength) * 100)));
+        } else if (event.event === "Finished") {
+          setProgress(100);
+        }
+      });
+      await relaunch();
+    } catch (caught) {
+      setError(String(caught));
+      setStatus("error");
+      setProgress(null);
+    }
+  };
+
+  const statusContent = status === "checking"
+    ? <><Activity size={14} className="spin" /> Checking GitHub Releases…</>
+    : status === "current"
+      ? <><Check size={14} /> You’re up to date.</>
+      : status === "available"
+        ? <><ArrowDownCircle size={14} /> NetSSH {availableUpdate?.version} is ready.</>
+        : status === "updating"
+          ? <><Activity size={14} className="spin" /> Installing update{progress != null ? ` · ${progress}%` : "…"}</>
+          : status === "unsupported"
+            ? <><ShieldCheck size={14} /> Updates are available in the packaged desktop app.</>
+            : status === "error"
+              ? <><X size={14} /> {error}</>
+              : <><ShieldCheck size={14} /> Signed updates are checked manually.</>;
+
+  return <section className="update-section"><div className="update-section-head"><div><strong>Application updates</strong><small>Signed releases are downloaded from GitHub</small></div><span className="update-version">v{version}</span></div><div className={`update-status ${status}`}>{statusContent}</div>{availableUpdate?.body && <p className="update-notes">{availableUpdate.body}</p>}{progress != null && status === "updating" && <div className="update-progress"><i style={{ width: `${progress}%` }} /></div>}<div className="update-actions"><button className="secondary-button" onClick={() => void checkForUpdates()} disabled={status === "checking" || status === "updating"}><RefreshCw size={14} className={status === "checking" ? "spin" : ""} /> Check for updates</button>{availableUpdate && <button className="primary-button" onClick={() => void installUpdate()} disabled={status === "updating"}><ArrowDownCircle size={14} /> Update now</button>}</div></section>;
+}
+
 function SettingsModal({ preferences, onClose, onSave }: { preferences: AppPreferences; onClose: () => void; onSave: (preferences: AppPreferences) => void }) {
   const [draft, setDraft] = useState(preferences);
-  return <div className="modal-backdrop" onMouseDown={onClose}><section className="settings-modal" onMouseDown={(event) => event.stopPropagation()}><div className="provider-modal-head"><div><span><Settings size={18} /></span><div><h3>NetSSH settings</h3><p>Workspace preferences are stored locally on this device.</p></div></div><button onClick={onClose}><X size={17} /></button></div><div className="settings-body"><label className="settings-select"><span><strong>Appearance</strong><small>Choose a light, dark, or operating-system theme</small></span><select value={draft.appearance} onChange={(event) => setDraft({ ...draft, appearance: event.target.value as Appearance })}><option value="dark">Dark</option><option value="light">Light</option><option value="system">Use system setting</option></select></label><label className="settings-select"><span><strong>Default connection protocol</strong><small>Used when creating a new device profile</small></span><select value={draft.defaultProtocol} onChange={(event) => setDraft({ ...draft, defaultProtocol: event.target.value as ConnectionProtocol })}><option value="ssh">SSH</option><option value="telnet">Telnet</option><option value="serial">Serial</option></select></label><label className="settings-toggle"><span><strong>Compact workspace</strong><small>Reduce tab, toolbar, and terminal spacing</small></span><input type="checkbox" checked={draft.compactWorkspace} onChange={(event) => setDraft({ ...draft, compactWorkspace: event.target.checked })} /></label><label className="settings-toggle"><span><strong>CLI autocomplete</strong><small>Suggest common network commands while typing in terminals</small></span><input type="checkbox" checked={draft.cliAutocomplete} onChange={(event) => setDraft({ ...draft, cliAutocomplete: event.target.checked })} /></label><label className="settings-toggle"><span><strong>Connection safety notices</strong><small>Show authentication and trust limitations in new sessions</small></span><input type="checkbox" checked={draft.showConnectionWarnings} onChange={(event) => setDraft({ ...draft, showConnectionWarnings: event.target.checked })} /></label><ConfigList title="Inventory sites" description="Available when adding or editing a device" items={draft.sites} placeholder="Add a site" onChange={(sites) => setDraft({ ...draft, sites })} /><ConfigList title="Device platforms" description="Vendor and operating-system choices" items={draft.platforms} placeholder="Add a platform" onChange={(platforms) => setDraft({ ...draft, platforms })} /><div className="settings-security"><ShieldCheck size={16} /><span>Credentials remain in the operating system vault. NetSSH does not store passwords in preferences.</span></div></div><div className="modal-actions settings-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" onClick={() => onSave(draft)}>Save settings</button></div></section></div>;
+  return <div className="modal-backdrop" onMouseDown={onClose}><section className="settings-modal" onMouseDown={(event) => event.stopPropagation()}><div className="provider-modal-head"><div><span><Settings size={18} /></span><div><h3>NetSSH settings</h3><p>Workspace preferences are stored locally on this device.</p></div></div><button onClick={onClose}><X size={17} /></button></div><div className="settings-body"><AppUpdateSection /><label className="settings-select"><span><strong>Appearance</strong><small>Choose a light, dark, or operating-system theme</small></span><select value={draft.appearance} onChange={(event) => setDraft({ ...draft, appearance: event.target.value as Appearance })}><option value="dark">Dark</option><option value="light">Light</option><option value="system">Use system setting</option></select></label><label className="settings-select"><span><strong>Default connection protocol</strong><small>Used when creating a new device profile</small></span><select value={draft.defaultProtocol} onChange={(event) => setDraft({ ...draft, defaultProtocol: event.target.value as ConnectionProtocol })}><option value="ssh">SSH</option><option value="telnet">Telnet</option><option value="serial">Serial</option></select></label><label className="settings-toggle"><span><strong>Compact workspace</strong><small>Reduce tab, toolbar, and terminal spacing</small></span><input type="checkbox" checked={draft.compactWorkspace} onChange={(event) => setDraft({ ...draft, compactWorkspace: event.target.checked })} /></label><label className="settings-toggle"><span><strong>CLI autocomplete</strong><small>Suggest common network commands while typing in terminals</small></span><input type="checkbox" checked={draft.cliAutocomplete} onChange={(event) => setDraft({ ...draft, cliAutocomplete: event.target.checked })} /></label><label className="settings-toggle"><span><strong>Connection safety notices</strong><small>Show authentication and trust limitations in new sessions</small></span><input type="checkbox" checked={draft.showConnectionWarnings} onChange={(event) => setDraft({ ...draft, showConnectionWarnings: event.target.checked })} /></label><ConfigList title="Inventory sites" description="Available when adding or editing a device" items={draft.sites} placeholder="Add a site" onChange={(sites) => setDraft({ ...draft, sites })} /><ConfigList title="Device platforms" description="Vendor and operating-system choices" items={draft.platforms} placeholder="Add a platform" onChange={(platforms) => setDraft({ ...draft, platforms })} /><div className="settings-security"><ShieldCheck size={16} /><span>Credentials remain in the operating system vault. NetSSH does not store passwords in preferences.</span></div></div><div className="modal-actions settings-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" onClick={() => onSave(draft)}>Save settings</button></div></section></div>;
 }
 
 function ConfigList({ title, description, items, placeholder, onChange }: { title: string; description: string; items: string[]; placeholder: string; onChange: (items: string[]) => void }) {
