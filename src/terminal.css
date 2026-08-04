@@ -11,6 +11,15 @@
   background: #b8785e;
 }
 
+.terminal-reconnect-hint {
+  color: #d0a56f;
+  font-weight: 600;
+}
+
+.terminal-actions .terminal-reconnect-button {
+  color: #d0a56f;
+}
+
 .terminal-input input:disabled {
   cursor: not-allowed;
   opacity: 0.55;
@@ -69,6 +78,26 @@
 .session-connection-badges { min-width: 0; display: flex; align-items: center; gap: 4px; overflow: hidden; }
 .terminal-toolbar .session-connection-badges { margin-left: 3px; }
 .terminal-toolbar .terminal-info-badge { height: 20px; padding-inline: 7px; }
+.terminal-toolbar-actions { flex: none; }
+.terminal-toolbar .terminal-toolbar-action {
+  width: auto;
+  min-width: 28px;
+  padding: 0 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  cursor: pointer;
+}
+.terminal-toolbar .terminal-toolbar-action span {
+  color: inherit;
+  font: 600 8px "Inter", sans-serif;
+  white-space: nowrap;
+}
+.terminal-toolbar .terminal-toolbar-action:disabled {
+  cursor: not-allowed;
+  opacity: .45;
+}
 .session-connection-badges.compact { margin-left: auto; flex: none; }
 .session-connection-badges.compact .terminal-info-badge { height: 20px; padding-inline: 6px; font-size: 7px; }
 .session-connection-badges.compact .latency-badge { display: none; }
@@ -218,6 +247,8 @@
 .theme-light .terminal-shell .terminal-status span:first-child { color: #7b998c; }
 
 @media(max-width:720px) {
+  .terminal-toolbar .terminal-toolbar-action { padding-inline: 6px; }
+  .terminal-toolbar .terminal-toolbar-action span { display: none; }
   .terminal-autocomplete-heading { min-width:36px; width:36px; padding:0 8px; }
   .terminal-autocomplete-heading > span { font-size:0; }
   .terminal-info-platform { display: none; }

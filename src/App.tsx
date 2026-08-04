@@ -124,6 +124,37 @@ function cleanTerminalOutput(value: string) {
     .replace(/[\u0000\u0007]/g, "");
 }
 
+function safeFileName(value: string) {
+  return value.trim().replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+|-+$/g, "") || "terminal";
+}
+
+function saveTerminalTranscript(session: Session) {
+  const protocol = (session.host.protocol ?? "ssh").toUpperCase();
+  const exportedAt = new Date();
+  const header = [
+    "NetSSH terminal transcript",
+    `Device: ${session.host.name}`,
+    `Address: ${session.host.address}`,
+    `Protocol: ${protocol}`,
+    `Site: ${session.host.site}`,
+    `Platform: ${session.host.platform}`,
+    `Saved: ${exportedAt.toLocaleString()}`,
+    "-".repeat(72),
+    "",
+  ].join("\n");
+  const transcript = cleanTerminalOutput(session.lines.map((line) => line.kind === "output" ? line.text : `\n[${line.kind.toUpperCase()}] ${line.text}\n`).join(""));
+  const value = `${header}${transcript.trimEnd()}\n`;
+  const date = exportedAt.toISOString().replace(/[:.]/g, "-");
+  const url = URL.createObjectURL(new Blob([value], { type: "text/plain;charset=utf-8" }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `${safeFileName(session.host.name)}-${date}.txt`;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1_000);
+}
+
 function App() {
   const [view, setView] = useState<View>("workspace");
   const [deviceHosts, setDeviceHosts] = useState<Host[]>(() => {
@@ -255,11 +286,15 @@ function App() {
     return { added, duplicates, profiles: nextProfiles.length - credentialProfiles.length };
   };
 
-  const startNativeSession = async (id: string, host: Host, username = "", password?: string): Promise<string | null> => {
+  const startNativeSession = async (id: string, host: Host, username = "", password?: string, reconnecting = false): Promise<string | null> => {
     const protocol = host.protocol ?? "ssh";
     const assignedCredential = credentialProfiles.find((credential) => credential.id === host.credentialId);
     const port = protocol === "serial" ? undefined : host.port ?? (protocol === "telnet" ? 23 : 22);
-    setSessions((current) => current.map((session) => session.id === id ? { ...session, connectionState: "connecting", lines: [...session.lines, { kind: "info", text: protocol === "ssh" ? `Preparing SSH connection to ${host.address}:${port}…` : protocol === "serial" ? `Opening ${host.address} at ${host.baudRate ?? 9600} baud…` : `Connecting to ${host.address}:${port} over TELNET…` }] } : session));
+    const cleanUsername = username.trim();
+    const connectionMessage = reconnecting
+      ? `Reconnecting to ${host.address}${protocol === "serial" ? ` at ${host.baudRate ?? 9600} baud` : `:${port}`}…`
+      : protocol === "ssh" ? `Preparing SSH connection to ${host.address}:${port}…` : protocol === "serial" ? `Opening ${host.address} at ${host.baudRate ?? 9600} baud…` : `Connecting to ${host.address}:${port} over TELNET…`;
+    setSessions((current) => current.map((session) => session.id === id ? { ...session, connected: false, connectionState: "connecting", suggestedUsername: cleanUsername || session.suggestedUsername, lines: [...session.lines, { kind: "info", text: connectionMessage }] } : session));
     let trustedFingerprint: string | undefined;
     let legacyRsa = false;
     let legacyKex = false;
@@ -285,8 +320,8 @@ function App() {
         }
         trustedFingerprint = fingerprint;
       }
-      setSessions((current) => current.map((session) => session.id === id ? { ...session, lines: [...session.lines, { kind: "info", text: protocol === "serial" ? `Opening ${host.address} at ${host.baudRate ?? 9600} baud…` : protocol === "ssh" && !username ? `SSH transport ready for ${host.address}:${port}; enter login details in the terminal…` : protocol === "telnet" && !username ? `Connected to ${host.address}:${port}; enter credentials when prompted…` : `Authenticating ${username}@${host.address}:${port} over ${protocol.toUpperCase()}…` }, ...(protocol === "telnet" ? [{ kind: "warning" as const, text: "Telnet credentials and session traffic are not encrypted. Use only on a trusted management network." }] : []), ...(legacyKex ? [{ kind: "warning" as const, text: "Compatibility mode: this device requires a legacy SHA-1 key exchange. Upgrade its SSH configuration when possible." }] : [])] } : session));
-      await startTerminalSession({ sessionId: id, deviceId: host.id, credentialId: assignedCredential?.id, protocol, target: host.address, port, baudRate: host.baudRate, username, password, trustedFingerprint, legacyRsa, legacyKex });
+      setSessions((current) => current.map((session) => session.id === id ? { ...session, suggestedUsername: cleanUsername || session.suggestedUsername, lines: [...session.lines, { kind: "info", text: protocol === "serial" ? `Opening ${host.address} at ${host.baudRate ?? 9600} baud…` : protocol === "ssh" && !cleanUsername ? `SSH transport ready for ${host.address}:${port}; enter login details in the terminal…` : protocol === "telnet" && !cleanUsername ? `Connected to ${host.address}:${port}; enter credentials when prompted…` : `Authenticating ${cleanUsername}@${host.address}:${port} over ${protocol.toUpperCase()}…` }, ...(protocol === "telnet" ? [{ kind: "warning" as const, text: "Telnet credentials and session traffic are not encrypted. Use only on a trusted management network." }] : []), ...(legacyKex ? [{ kind: "warning" as const, text: "Compatibility mode: this device requires a legacy SHA-1 key exchange. Upgrade its SSH configuration when possible." }] : [])] } : session));
+      await startTerminalSession({ sessionId: id, deviceId: host.id, credentialId: assignedCredential?.id, protocol, target: host.address, port, baudRate: host.baudRate, username: cleanUsername, password, trustedFingerprint, legacyRsa, legacyKex });
       setHistory((current) => [{ id: crypto.randomUUID(), deviceId: host.id, deviceName: host.name, protocol, address: host.address, startedAt: Date.now(), success: true, detail: `${protocol.toUpperCase()} session connected` }, ...current].slice(0, 250));
       return id;
     } catch (caught) {
@@ -358,6 +393,32 @@ function App() {
       catch (caught) { notify(`Credential could not be saved: ${String(caught)}`); }
     }
     await startNativeSession(id, session.host, credentials.username.trim(), credentials.password);
+  };
+
+  const reconnectSession = async (id: string) => {
+    const session = sessions.find((item) => item.id === id);
+    if (!session || session.connectionState === "connecting") return;
+    if (session.host.demoProfile) {
+      ciscoDemoStates.current.set(id, { input: "", pages: [], history: [], historyIndex: 0 });
+      setSessions((current) => current.map((item) => item.id === id ? {
+        ...item,
+        connected: true,
+        connectionState: "connected",
+        lines: [...item.lines, { kind: "info", text: `Reconnected to ${item.host.name}` }, { kind: "output", text: ciscoDemoWelcome(item.host) }],
+      } : item));
+      return;
+    }
+    if (!isNativeApp()) {
+      notify("Reconnect is available for live sessions in the NetSSH desktop app.");
+      return;
+    }
+    if (session.connected || session.connectionState === "connected") {
+      await closeTerminal(id).catch(() => undefined);
+      await new Promise((resolve) => window.setTimeout(resolve, 150));
+    }
+    const assignedCredential = credentialProfiles.find((credential) => credential.id === session.host.credentialId);
+    const username = session.suggestedUsername ?? assignedCredential?.username ?? session.host.username ?? "";
+    await startNativeSession(id, session.host, username, undefined, true);
   };
 
   const closeSessions = (ids: string[]) => {
@@ -474,7 +535,7 @@ function App() {
         <Topbar view={view} onSearch={() => setSearchOpen(true)} notifications={notifications} notificationsOpen={notificationsOpen} onToggleNotifications={() => { setNotificationsOpen((open) => !open); setSettingsOpen(false); setNotifications((current) => current.map((item) => ({ ...item, read: true }))); }} onClearNotifications={() => setNotifications([])} onOpenSettings={() => { setSettingsOpen(true); setNotificationsOpen(false); }} />
         <div className="content">
           {view === "workspace" && (
-            <Workspace sessions={sessions} activeId={activeSession} session={currentSession} hosts={deviceHosts} userName={userProfile.name} autocompleteEnabled={preferences.cliAutocomplete} onAuthenticate={authenticateSession} onActivate={setActiveSession} onClose={closeSession} onCloseMany={closeSessions} onConnect={connect} onNewSession={(host) => connect(host, true)} onCommand={appendLines} onTerminalData={sendTerminalData} onAddDevice={() => setAddDeviceOpen(true)} onShowInventory={() => setView("inventory")} notify={notify} />
+            <Workspace sessions={sessions} activeId={activeSession} session={currentSession} hosts={deviceHosts} userName={userProfile.name} autocompleteEnabled={preferences.cliAutocomplete} onAuthenticate={authenticateSession} onReconnect={reconnectSession} onActivate={setActiveSession} onClose={closeSession} onCloseMany={closeSessions} onConnect={connect} onNewSession={(host) => connect(host, true)} onCommand={appendLines} onTerminalData={sendTerminalData} onAddDevice={() => setAddDeviceOpen(true)} onShowInventory={() => setView("inventory")} notify={notify} />
           )}
           {view === "inventory" && <Inventory hosts={deviceHosts} onConnect={connect} onAdd={() => setAddDeviceOpen(true)} onTransfer={() => setSessionTransferOpen(true)} onEdit={setEditingHost} onFavorite={(id) => setDeviceHosts((current) => current.map((host) => host.id === id ? { ...host, favorite: !host.favorite } : host))} onDelete={(id) => { setDeviceHosts((current) => current.filter((host) => host.id !== id)); deleteDevicePassword(id).catch(() => undefined); notify("Device removed"); }} />}
           {view === "topology" && <TopologyDesigner hosts={deviceHosts} onConnect={(host) => { setView("workspace"); void connect(host); }} notify={notify} />}
@@ -680,7 +741,7 @@ function SessionConnectionBadges({ session, compact = false }: { session: Sessio
   return <div className={`session-connection-badges ${compact ? "compact" : ""}`}><span className={`terminal-info-badge ${connectionTone}`}><CircleDot size={10} />{stateLabel}</span><span className={`terminal-info-badge protocol ${protocol}`}><ShieldCheck size={10} />{protocol === "ssh" ? "SSH encrypted" : protocol === "telnet" ? "Telnet unencrypted" : "Local serial"}</span><span className={`terminal-info-badge ${session.host.status === "online" ? "good" : session.host.status === "warning" ? "pending" : "bad"}`}><Router size={10} />{statusLabel[session.host.status]}</span>{session.host.latency != null && <span className={`terminal-info-badge latency-badge ${latencyTone}`}><Activity size={10} />{session.host.latency} ms</span>}</div>;
 }
 
-function Workspace({ sessions, activeId, session, hosts, userName, autocompleteEnabled, onAuthenticate, onActivate, onClose, onCloseMany, onConnect, onNewSession, onCommand, onTerminalData, onAddDevice, onShowInventory, notify }: { sessions: Session[]; activeId: string | null; session?: Session; hosts: Host[]; userName: string; autocompleteEnabled: boolean; onAuthenticate: (id: string, credentials: ConnectionCredentials) => Promise<void>; onActivate: (id: string) => void; onClose: (id: string) => void; onCloseMany: (ids: string[]) => void; onConnect: (host: Host) => void; onNewSession: (host: Host) => Promise<string | null>; onCommand: (id: string, lines: TerminalLine[]) => void; onTerminalData: (id: string, data: string) => void; onAddDevice: () => void; onShowInventory: () => void; notify: (message: string) => void }) {
+function Workspace({ sessions, activeId, session, hosts, userName, autocompleteEnabled, onAuthenticate, onReconnect, onActivate, onClose, onCloseMany, onConnect, onNewSession, onCommand, onTerminalData, onAddDevice, onShowInventory, notify }: { sessions: Session[]; activeId: string | null; session?: Session; hosts: Host[]; userName: string; autocompleteEnabled: boolean; onAuthenticate: (id: string, credentials: ConnectionCredentials) => Promise<void>; onReconnect: (id: string) => Promise<void>; onActivate: (id: string) => void; onClose: (id: string) => void; onCloseMany: (ids: string[]) => void; onConnect: (host: Host) => void; onNewSession: (host: Host) => Promise<string | null>; onCommand: (id: string, lines: TerminalLine[]) => void; onTerminalData: (id: string, data: string) => void; onAddDevice: () => void; onShowInventory: () => void; notify: (message: string) => void }) {
   const [layout, setLayout] = useState<"single" | "split" | "ai">("single");
   const [primaryId, setPrimaryId] = useState<string | null>(activeId);
   const [secondaryId, setSecondaryId] = useState<string | null>(null);
@@ -757,17 +818,17 @@ function Workspace({ sessions, activeId, session, hosts, userName, autocompleteE
         <button className="new-tab" aria-label="Open new session tab" title="Open new session tab" onClick={() => setPickerMode("tab")}><Plus size={15} /></button>
       </div>
       {tabContextMenu && <div className="tab-context-menu" style={{ left: tabContextMenu.x, top: tabContextMenu.y }} onClick={(event) => event.stopPropagation()}><button onClick={() => { onClose(tabContextMenu.id); setTabContextMenu(null); }}><X size={14} /><span>Close tab</span></button><button disabled={sessions.length < 2} onClick={() => { onCloseMany(sessions.filter((item) => item.id !== tabContextMenu.id).map((item) => item.id)); setTabContextMenu(null); }}><Layers3 size={14} /><span>Close other tabs</span></button><div /><button className="menu-danger" onClick={() => { onCloseMany(sessions.map((item) => item.id)); setTabContextMenu(null); }}><Trash2 size={14} /><span>Close all tabs</span></button></div>}
-      <div className="terminal-toolbar"><div className="terminal-toolbar-device"><CircleDot size={14} /><strong>{primary.host.name}</strong><span className="terminal-toolbar-address">{primary.host.address}</span><SessionConnectionBadges session={primary} /></div><div><button className={layout === "split" ? "toolbar-active" : ""} aria-label="Toggle split sessions" title="Toggle split sessions" onClick={toggleSplit}><Grid2X2 size={15} /></button><button className={layout === "ai" ? "toolbar-active" : ""} aria-label="Toggle AI side panel" title="Toggle AI side panel" onClick={() => setLayout(layout === "ai" ? "single" : "ai")}><Bot size={15} /></button><div className="session-menu-wrap"><button className={sessionMenuOpen ? "toolbar-active" : ""} aria-label="Session options" onClick={() => { setTabContextMenu(null); setSessionMenuOpen((open) => !open); }}><MoreHorizontal size={16} /></button>{sessionMenuOpen && <div className="session-menu"><button onClick={async () => { setSessionMenuOpen(false); await onNewSession(primary.host); }}><Plus size={14} /><span><strong>Duplicate tab</strong><small>Open another independent session</small></span></button><button onClick={() => { setSessionMenuOpen(false); toggleSplit(); }}><Grid2X2 size={14} /><span><strong>{layout === "split" ? "Close split view" : "Split with session"}</strong><small>{layout === "split" ? "Return to one pane" : "Choose a second device pane"}</small></span></button><button onClick={() => { navigator.clipboard?.writeText(primary.host.address); setSessionMenuOpen(false); notify("Address copied"); }}><Copy size={14} /><span><strong>Copy address</strong><small>{primary.host.address}</small></span></button>{primary.host.credentialId && <button onClick={() => { setSessionMenuOpen(false); writeTerminalEnablePassword(primary.id, primary.host.credentialId!).then(() => notify("Enable password sent securely")).catch((caught) => notify((caught as Error).message)); }}><KeyRound size={14} /><span><strong>Send enable password</strong><small>Use only at the device enable prompt</small></span></button>}<button className="menu-danger" onClick={() => { setSessionMenuOpen(false); onClose(primary.id); }}><Trash2 size={14} /><span><strong>Close session</strong><small>Close this workspace tab</small></span></button><button className="menu-danger" onClick={() => { setSessionMenuOpen(false); onCloseMany(sessions.map((item) => item.id)); }}><Trash2 size={14} /><span><strong>Close all sessions</strong><small>Close every workspace tab</small></span></button></div>}</div></div></div>
-      {layout === "single" && <Terminal session={primary} autocompleteEnabled={autocompleteEnabled} onAuthenticate={onAuthenticate} onData={(data) => onTerminalData(primary.id, data)} />}
-      {layout === "split" && secondary && <div className="workspace-panes"><SessionPane session={primary} sessions={sessions} excludedId={secondary.id} active={focusedPane === primary.id} autocompleteEnabled={autocompleteEnabled} onAuthenticate={onAuthenticate} onSelect={selectPrimary} onActivate={() => setFocusedPane(primary.id)} onData={(data) => onTerminalData(primary.id, data)} /><SessionPane session={secondary} sessions={sessions} excludedId={primary.id} active={focusedPane === secondary.id} autocompleteEnabled={autocompleteEnabled} onAuthenticate={onAuthenticate} onSelect={selectSecondary} onActivate={() => setFocusedPane(secondary.id)} onData={(data) => onTerminalData(secondary.id, data)} /></div>}
-      {layout === "ai" && <div className={`workspace-panes ai-workspace ${aiWebMode ? "web-provider-workspace" : ""}`}><SessionPane session={primary} sessions={sessions} active autocompleteEnabled={autocompleteEnabled} onAuthenticate={onAuthenticate} onSelect={(id) => { setPrimaryId(id); onActivate(id); }} onActivate={() => onActivate(primary.id)} onData={(data) => onTerminalData(primary.id, data)} /><AiSidePanel session={primary} notify={notify} onWebModeChange={setAiWebMode} /></div>}
+      <div className="terminal-toolbar"><div className="terminal-toolbar-device"><CircleDot size={14} /><strong>{primary.host.name}</strong><span className="terminal-toolbar-address">{primary.host.address}</span><SessionConnectionBadges session={primary} /></div><div className="terminal-toolbar-actions"><button className="terminal-toolbar-action" disabled={primary.connectionState === "connecting"} aria-label={`Reconnect ${primary.host.name}`} title={`Reconnect ${primary.host.name}`} onClick={() => void onReconnect(primary.id)}><RefreshCw size={14} className={primary.connectionState === "connecting" ? "spin" : ""} /><span>Reconnect</span></button><button className="terminal-toolbar-action" disabled={!primary.lines.length} aria-label={`Save ${primary.host.name} terminal transcript`} title="Save terminal transcript as a text file" onClick={() => { saveTerminalTranscript(primary); notify("Terminal transcript saved"); }}><FileDown size={14} /><span>Save log</span></button><button className={layout === "split" ? "toolbar-active" : ""} aria-label="Toggle split sessions" title="Toggle split sessions" onClick={toggleSplit}><Grid2X2 size={15} /></button><button className={layout === "ai" ? "toolbar-active" : ""} aria-label="Toggle AI side panel" title="Toggle AI side panel" onClick={() => setLayout(layout === "ai" ? "single" : "ai")}><Bot size={15} /></button><div className="session-menu-wrap"><button className={sessionMenuOpen ? "toolbar-active" : ""} aria-label="Session options" onClick={() => { setTabContextMenu(null); setSessionMenuOpen((open) => !open); }}><MoreHorizontal size={16} /></button>{sessionMenuOpen && <div className="session-menu"><button onClick={async () => { setSessionMenuOpen(false); await onNewSession(primary.host); }}><Plus size={14} /><span><strong>Duplicate tab</strong><small>Open another independent session</small></span></button><button onClick={() => { setSessionMenuOpen(false); toggleSplit(); }}><Grid2X2 size={14} /><span><strong>{layout === "split" ? "Close split view" : "Split with session"}</strong><small>{layout === "split" ? "Return to one pane" : "Choose a second device pane"}</small></span></button><button onClick={() => { navigator.clipboard?.writeText(primary.host.address); setSessionMenuOpen(false); notify("Address copied"); }}><Copy size={14} /><span><strong>Copy address</strong><small>{primary.host.address}</small></span></button>{primary.host.credentialId && <button onClick={() => { setSessionMenuOpen(false); writeTerminalEnablePassword(primary.id, primary.host.credentialId!).then(() => notify("Enable password sent securely")).catch((caught) => notify((caught as Error).message)); }}><KeyRound size={14} /><span><strong>Send enable password</strong><small>Use only at the device enable prompt</small></span></button>}<button className="menu-danger" onClick={() => { setSessionMenuOpen(false); onClose(primary.id); }}><Trash2 size={14} /><span><strong>Close session</strong><small>Close this workspace tab</small></span></button><button className="menu-danger" onClick={() => { setSessionMenuOpen(false); onCloseMany(sessions.map((item) => item.id)); }}><Trash2 size={14} /><span><strong>Close all sessions</strong><small>Close every workspace tab</small></span></button></div>}</div></div></div>
+      {layout === "single" && <Terminal session={primary} autocompleteEnabled={autocompleteEnabled} onAuthenticate={onAuthenticate} onReconnect={() => onReconnect(primary.id)} onData={(data) => onTerminalData(primary.id, data)} />}
+      {layout === "split" && secondary && <div className="workspace-panes"><SessionPane session={primary} sessions={sessions} excludedId={secondary.id} active={focusedPane === primary.id} autocompleteEnabled={autocompleteEnabled} onAuthenticate={onAuthenticate} onReconnect={() => onReconnect(primary.id)} onSelect={selectPrimary} onActivate={() => setFocusedPane(primary.id)} onData={(data) => onTerminalData(primary.id, data)} /><SessionPane session={secondary} sessions={sessions} excludedId={primary.id} active={focusedPane === secondary.id} autocompleteEnabled={autocompleteEnabled} onAuthenticate={onAuthenticate} onReconnect={() => onReconnect(secondary.id)} onSelect={selectSecondary} onActivate={() => setFocusedPane(secondary.id)} onData={(data) => onTerminalData(secondary.id, data)} /></div>}
+      {layout === "ai" && <div className={`workspace-panes ai-workspace ${aiWebMode ? "web-provider-workspace" : ""}`}><SessionPane session={primary} sessions={sessions} active autocompleteEnabled={autocompleteEnabled} onAuthenticate={onAuthenticate} onReconnect={() => onReconnect(primary.id)} onSelect={(id) => { setPrimaryId(id); onActivate(id); }} onActivate={() => onActivate(primary.id)} onData={(data) => onTerminalData(primary.id, data)} /><AiSidePanel session={primary} notify={notify} onWebModeChange={setAiWebMode} /></div>}
       {pickerMode && <SessionPicker hosts={hosts} title={pickerMode === "split" ? "Open session beside this one" : "Open a new session tab"} onClose={() => setPickerMode(null)} onSelect={selectDevice} onAddDevice={() => { setPickerMode(null); onAddDevice(); }} />}
     </section>
   );
 }
 
-function SessionPane({ session, sessions, excludedId, active, autocompleteEnabled, onAuthenticate, onSelect, onActivate, onData }: { session: Session; sessions: Session[]; excludedId?: string; active: boolean; autocompleteEnabled: boolean; onAuthenticate: (id: string, credentials: ConnectionCredentials) => Promise<void>; onSelect: (id: string) => void; onActivate: () => void; onData: (data: string) => void }) {
-  return <section className={`session-pane ${active ? "active" : ""}`} onMouseDown={onActivate}><div className="pane-heading"><span className={`device-state ${session.host.status}`} /><div className="pane-session-select"><select aria-label="Session displayed in this pane" value={session.id} onChange={(event) => { event.stopPropagation(); onSelect(event.target.value); }}>{sessions.map((item) => <option value={item.id} disabled={item.id === excludedId} key={item.id}>{item.host.name} · {item.host.address}</option>)}</select><ChevronDown size={12} /></div><SessionConnectionBadges session={session} compact /></div><Terminal session={session} autoFocus={active} autocompleteEnabled={autocompleteEnabled} onAuthenticate={onAuthenticate} onData={onData} /></section>;
+function SessionPane({ session, sessions, excludedId, active, autocompleteEnabled, onAuthenticate, onReconnect, onSelect, onActivate, onData }: { session: Session; sessions: Session[]; excludedId?: string; active: boolean; autocompleteEnabled: boolean; onAuthenticate: (id: string, credentials: ConnectionCredentials) => Promise<void>; onReconnect: () => Promise<void>; onSelect: (id: string) => void; onActivate: () => void; onData: (data: string) => void }) {
+  return <section className={`session-pane ${active ? "active" : ""}`} onMouseDown={onActivate}><div className="pane-heading"><span className={`device-state ${session.host.status}`} /><div className="pane-session-select"><select aria-label="Session displayed in this pane" value={session.id} onChange={(event) => { event.stopPropagation(); onSelect(event.target.value); }}>{sessions.map((item) => <option value={item.id} disabled={item.id === excludedId} key={item.id}>{item.host.name} · {item.host.address}</option>)}</select><ChevronDown size={12} /></div><SessionConnectionBadges session={session} compact /></div><Terminal session={session} autoFocus={active} autocompleteEnabled={autocompleteEnabled} onAuthenticate={onAuthenticate} onReconnect={onReconnect} onData={onData} /></section>;
 }
 
 function SessionPicker({ hosts, title, onClose, onSelect, onAddDevice }: { hosts: Host[]; title: string; onClose: () => void; onSelect: (host: Host) => void; onAddDevice: () => void }) {
@@ -888,17 +949,19 @@ function TerminalLogin({ session, onAuthenticate }: { session: Session; onAuthen
   return <div className="terminal terminal-login"><form onSubmit={submit}><div className="terminal-login-brand"><TerminalSquare size={20} /><span><strong>{session.host.name}</strong><small>{session.host.address} · SSH authentication</small></span></div><p>SSH authenticates before the switch can open its command prompt. Enter a username, or assign a saved login to connect automatically next time.</p><label><span>Username</span><input autoFocus value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="username" /></label><label><span>Password <em>optional</em></span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" placeholder="Leave blank for keyboard-interactive or passwordless login" /></label>{session.host.credentialId && password && <label className="terminal-login-save"><input type="checkbox" checked={savePassword} onChange={(event) => setSavePassword(event.target.checked)} /><span>Save to the assigned credential profile</span></label>}<button className="primary-button" disabled={!username.trim() || submitting}>{submitting ? "Connecting…" : password ? "Connect" : "Try without password"}</button></form><div className="terminal-status disconnected"><span><i /> SSH · Waiting for login</span><span>Credentials stay local</span></div></div>;
 }
 
-function Terminal({ session, onData, onAuthenticate, autocompleteEnabled, autoFocus = true }: { session: Session; onData: (data: string) => void; onAuthenticate: (id: string, credentials: ConnectionCredentials) => Promise<void>; autocompleteEnabled: boolean; autoFocus?: boolean }) {
+function Terminal({ session, onData, onAuthenticate, onReconnect, autocompleteEnabled, autoFocus = true }: { session: Session; onData: (data: string) => void; onAuthenticate: (id: string, credentials: ConnectionCredentials) => Promise<void>; onReconnect: () => Promise<void>; autocompleteEnabled: boolean; autoFocus?: boolean }) {
   if (session.connectionState === "awaiting-credentials") return <TerminalLogin session={session} onAuthenticate={onAuthenticate} />;
-  return <InteractiveTerminal session={session} onData={onData} autocompleteEnabled={autocompleteEnabled} autoFocus={autoFocus} />;
+  return <InteractiveTerminal session={session} onData={onData} onReconnect={onReconnect} autocompleteEnabled={autocompleteEnabled} autoFocus={autoFocus} />;
 }
 
-function InteractiveTerminal({ session, onData, autocompleteEnabled, autoFocus = true }: { session: Session; onData: (data: string) => void; autocompleteEnabled: boolean; autoFocus?: boolean }) {
+function InteractiveTerminal({ session, onData, onReconnect, autocompleteEnabled, autoFocus = true }: { session: Session; onData: (data: string) => void; onReconnect: () => Promise<void>; autocompleteEnabled: boolean; autoFocus?: boolean }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const autocompleteRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<XTerm | null>(null);
   const onDataRef = useRef(onData);
+  const onReconnectRef = useRef(onReconnect);
   const connectedRef = useRef(session.connected);
+  const connectionStateRef = useRef(session.connectionState);
   const renderedLines = useRef(0);
   const inputBuffer = useRef("");
   const suggestionRef = useRef<CiscoCommandSuggestion | null>(null);
@@ -906,7 +969,9 @@ function InteractiveTerminal({ session, onData, autocompleteEnabled, autoFocus =
   const [suggestions, setSuggestions] = useState<CiscoCommandSuggestion[]>([]);
   const [suggestionIndex, setSuggestionIndex] = useState(0);
   onDataRef.current = onData;
+  onReconnectRef.current = onReconnect;
   connectedRef.current = session.connected || session.connectionState === "connecting";
+  connectionStateRef.current = session.connectionState;
 
   const updateSuggestions = (value: string) => {
     const matches = autocompleteEnabled ? findCiscoCommandSuggestions(value) : [];
@@ -1021,6 +1086,12 @@ function InteractiveTerminal({ session, onData, autocompleteEnabled, autoFocus =
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown") return true;
       const key = event.key.toLowerCase();
+      if (!connectedRef.current && !event.ctrlKey && !event.metaKey && !event.altKey && key === "r" && ["closed", "error"].includes(connectionStateRef.current ?? "")) {
+        event.preventDefault();
+        event.stopPropagation();
+        void onReconnectRef.current();
+        return false;
+      }
       if (autocompleteEnabled && suggestionsRef.current.length && (event.key === "ArrowRight" || event.key === "ArrowLeft")) {
         event.preventDefault();
         event.stopPropagation();
@@ -1077,7 +1148,8 @@ function InteractiveTerminal({ session, onData, autocompleteEnabled, autoFocus =
   }, [suggestionIndex, suggestions]);
 
   const stateLabel = session.connectionState === "connecting" ? "Connecting" : session.connected ? "Connected" : session.connectionState === "error" ? "Error" : "Closed";
-  return <div className="terminal terminal-shell"><div className="xterm-host" ref={hostRef} aria-label={`${session.host.name} interactive terminal`} onContextMenu={(event) => { event.preventDefault(); void pasteClipboard(); }} /><div ref={autocompleteRef} className={`terminal-autocomplete ${suggestions.length ? "has-suggestions" : "idle"}`}><div className="terminal-autocomplete-heading"><span><Sparkles size={11} /> Command assist</span><small><kbd>←→</kbd> navigate <kbd>Tab</kbd> accept <kbd>Esc</kbd> close</small></div>{suggestions.length ? suggestions.map((suggestion, index) => <button key={suggestion.command} title={suggestion.description} aria-label={`${suggestion.command}. ${suggestion.description}`} className={index === suggestionIndex ? `active ${suggestion.kind}` : suggestion.kind} onMouseEnter={() => { suggestionRef.current = suggestion; setSuggestionIndex(index); }} onMouseDown={(event) => event.preventDefault()} onClick={() => acceptSuggestion(suggestion)}><Command size={11} /><code>{suggestion.command}</code><em>{suggestion.kind === "show" ? "Read only" : suggestion.kind === "action" ? "Review" : "Configure"}</em></button>) : <span className="terminal-autocomplete-idle">Type a Cisco command or abbreviation · ← → select · Tab accept</span>}</div><div className={`terminal-status ${session.connected ? "connected" : "disconnected"}`}><span><i /> {(session.host.protocol ?? "ssh").toUpperCase()} · {stateLabel}</span><span>{autocompleteEnabled ? "Autocomplete on" : "Autocomplete off"}</span><span>xterm-256color</span><span>UTF-8</span><div className="terminal-actions"><button type="button" onClick={() => void copySelection()} title="Copy selection (Ctrl+Shift+C / Cmd+C)"><Copy size={11} /> Copy</button><button type="button" onClick={() => void pasteClipboard()} title="Paste (Ctrl+Shift+V / Cmd+V)"><ClipboardPaste size={11} /> Paste</button><button type="button" onClick={() => { terminalRef.current?.clear(); terminalRef.current?.focus(); }} title="Clear local scrollback"><Trash2 size={11} /> Clear</button></div></div></div>;
+  const canReconnect = !session.connected && ["closed", "error"].includes(session.connectionState ?? "");
+  return <div className="terminal terminal-shell"><div className="xterm-host" ref={hostRef} aria-label={`${session.host.name} interactive terminal`} onContextMenu={(event) => { event.preventDefault(); void pasteClipboard(); }} /><div ref={autocompleteRef} className={`terminal-autocomplete ${suggestions.length ? "has-suggestions" : "idle"}`}><div className="terminal-autocomplete-heading"><span><Sparkles size={11} /> Command assist</span><small><kbd>←→</kbd> navigate <kbd>Tab</kbd> accept <kbd>Esc</kbd> close</small></div>{suggestions.length ? suggestions.map((suggestion, index) => <button key={suggestion.command} title={suggestion.description} aria-label={`${suggestion.command}. ${suggestion.description}`} className={index === suggestionIndex ? `active ${suggestion.kind}` : suggestion.kind} onMouseEnter={() => { suggestionRef.current = suggestion; setSuggestionIndex(index); }} onMouseDown={(event) => event.preventDefault()} onClick={() => acceptSuggestion(suggestion)}><Command size={11} /><code>{suggestion.command}</code><em>{suggestion.kind === "show" ? "Read only" : suggestion.kind === "action" ? "Review" : "Configure"}</em></button>) : <span className="terminal-autocomplete-idle">Type a Cisco command or abbreviation · ← → select · Tab accept</span>}</div><div className={`terminal-status ${session.connected ? "connected" : "disconnected"}`}><span><i /> {(session.host.protocol ?? "ssh").toUpperCase()} · {stateLabel}</span>{canReconnect && <span className="terminal-reconnect-hint">Press R or use Reconnect</span>}<span>{autocompleteEnabled ? "Autocomplete on" : "Autocomplete off"}</span><span>xterm-256color</span><span>UTF-8</span><div className="terminal-actions">{canReconnect && <button className="terminal-reconnect-button" type="button" onClick={() => void onReconnect()} title="Reconnect session (R)"><RefreshCw size={11} /> Reconnect</button>}<button type="button" onClick={() => void copySelection()} title="Copy selection (Ctrl+Shift+C / Cmd+C)"><Copy size={11} /> Copy</button><button type="button" onClick={() => void pasteClipboard()} title="Paste (Ctrl+Shift+V / Cmd+V)"><ClipboardPaste size={11} /> Paste</button><button type="button" onClick={() => { terminalRef.current?.clear(); terminalRef.current?.focus(); }} title="Clear local scrollback"><Trash2 size={11} /> Clear</button></div></div></div>;
 }
 
 function Inventory({ hosts, onConnect, onAdd, onTransfer, onEdit, onFavorite, onDelete }: { hosts: Host[]; onConnect: (host: Host) => void; onAdd: () => void; onTransfer: () => void; onEdit: (host: Host) => void; onFavorite: (id: string) => void; onDelete: (id: string) => void }) {
