@@ -38,6 +38,16 @@ pub struct SwitchInterfaceOutput {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DiscoveredSshDevice {
+    address: String,
+    hostname: Option<String>,
+    platform: Option<String>,
+    fingerprint: Option<String>,
+    elapsed_ms: u128,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SerialPortInfo {
     name: String,
     port_type: String,
@@ -396,6 +406,214 @@ pub async fn collect_switch_interface_data(
     }
     Ok(SwitchInterfaceOutput {
         output,
+        elapsed_ms: started.elapsed().as_millis(),
+    })
+}
+
+async fn read_ssh_command(
+    handle: &mut client::Handle<SshHandler>,
+    command: &str,
+) -> Result<String, String> {
+    let mut channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|error| format!("Unable to open the discovery command channel: {error}"))?;
+    channel
+        .exec(true, command)
+        .await
+        .map_err(|error| format!("The device rejected the discovery command: {error}"))?;
+    let output = timeout(Duration::from_secs(8), async {
+        let mut bytes = Vec::new();
+        while let Some(message) = channel.wait().await {
+            match message {
+                russh::ChannelMsg::Data { data } | russh::ChannelMsg::ExtendedData { data, .. } => {
+                    bytes.extend_from_slice(&data)
+                }
+                russh::ChannelMsg::Eof | russh::ChannelMsg::Close => break,
+                _ => {}
+            }
+        }
+        bytes
+    })
+    .await
+    .map_err(|_| format!("The discovery command timed out: {command}"))?;
+    Ok(String::from_utf8_lossy(&output).to_string())
+}
+
+fn discovery_token(value: &str) -> Option<String> {
+    let value = value
+        .trim()
+        .trim_matches(|character: char| matches!(character, ':' | '=' | '"' | '\''));
+    if value.is_empty()
+        || value.len() > 253
+        || value.contains(char::is_whitespace)
+        || !value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_' | ':')
+        })
+    {
+        return None;
+    }
+    Some(value.to_owned())
+}
+
+fn parse_discovery_hostname(output: &str) -> Option<String> {
+    for line in output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let lower = line.to_ascii_lowercase();
+        let candidate = if lower.starts_with("hostname ") {
+            line.split_once(char::is_whitespace).map(|(_, value)| value)
+        } else if lower.starts_with("hostname:") || lower.starts_with("host name:") {
+            line.split_once(':').map(|(_, value)| value)
+        } else if lower.contains("hostname is ") {
+            line.get(lower.find("hostname is ").unwrap_or(0) + "hostname is ".len()..)
+        } else if lower.starts_with("set system host-name ") {
+            line.split_whitespace().last()
+        } else if lower.starts_with("system name:") {
+            line.split_once(':').map(|(_, value)| value)
+        } else {
+            None
+        };
+        if let Some(hostname) = candidate.and_then(discovery_token) {
+            return Some(hostname);
+        }
+    }
+    None
+}
+
+fn parse_bare_discovery_hostname(output: &str) -> Option<String> {
+    let lines = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if lines.len() == 1 {
+        return discovery_token(lines[0]);
+    }
+    None
+}
+
+fn parse_discovery_platform(output: &str) -> Option<String> {
+    let value = output.to_ascii_lowercase();
+    [
+        ("cisco ios xe", "Cisco IOS-XE"),
+        ("ios-xe", "Cisco IOS-XE"),
+        ("ios software", "Cisco IOS"),
+        ("cisco nexus operating system", "Cisco NX-OS"),
+        ("nx-os", "Cisco NX-OS"),
+        ("arista eos", "Arista EOS"),
+        ("junos", "Juniper JunOS"),
+        ("juniper", "Juniper JunOS"),
+        ("fortios", "Fortinet FortiOS"),
+        ("fortigate", "Fortinet FortiOS"),
+        ("pan-os", "Palo Alto PAN-OS"),
+        ("palo alto", "Palo Alto PAN-OS"),
+    ]
+    .into_iter()
+    .find_map(|(marker, platform)| value.contains(marker).then_some(platform.to_owned()))
+}
+
+#[tauri::command]
+pub async fn discover_ssh_device(
+    credential_id: String,
+    target: String,
+    port: u16,
+    username: String,
+) -> Result<DiscoveredSshDevice, String> {
+    let started = Instant::now();
+    let target = validate_target(&target, "ssh")?;
+    let port = validate_port(port)?;
+    let credential_id = credential_id.trim().to_owned();
+    if credential_id.is_empty() {
+        return Err("Select a saved login profile before scanning".into());
+    }
+    let username = username.trim().to_owned();
+    if username.is_empty() {
+        return Err("The selected login profile has no username".into());
+    }
+    let password = super::resolve_login_password(None, Some(&credential_id), &target)?
+        .ok_or_else(|| "The selected login has no stored password".to_string())?;
+
+    let mut legacy_rsa = false;
+    let mut legacy_kex = false;
+    let observed = Arc::new(std::sync::Mutex::new(None));
+    let mut handle = loop {
+        let handler = SshHandler {
+            expected_fingerprint: None,
+            observed_fingerprint: observed.clone(),
+        };
+        match timeout(
+            Duration::from_secs(10),
+            client::connect(
+                ssh_config(legacy_rsa, legacy_kex),
+                (target.as_str(), port),
+                handler,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(session)) => break session,
+            Ok(Err(error)) => {
+                let message = error.to_string();
+                if no_common_kex_algorithm(&message) && !legacy_kex {
+                    legacy_kex = true;
+                    continue;
+                }
+                if message.contains("Wrong server signature") && !legacy_rsa {
+                    legacy_rsa = true;
+                    continue;
+                }
+                return Err(format!("SSH connection to {target}:{port} failed: {error}"));
+            }
+            Err(_) => return Err(format!("SSH connection to {target}:{port} timed out")),
+        }
+    };
+
+    let authentication = handle
+        .authenticate_password(&username, &password)
+        .await
+        .map_err(|error| format!("SSH authentication failed: {error}"))?;
+    if !authentication.success() {
+        return Err("SSH authentication was rejected by the device".into());
+    }
+
+    let version = read_ssh_command(&mut handle, "show version | no-more")
+        .await
+        .unwrap_or_default();
+    let mut identity_output = version.clone();
+    let mut hostname = parse_discovery_hostname(&identity_output);
+    if hostname.is_none() {
+        identity_output.push('\n');
+        let hostname_output = read_ssh_command(&mut handle, "show hostname")
+            .await
+            .unwrap_or_default();
+        hostname = parse_discovery_hostname(&hostname_output)
+            .or_else(|| parse_bare_discovery_hostname(&hostname_output));
+        identity_output.push_str(&hostname_output);
+    }
+    if hostname.is_none() {
+        identity_output.push('\n');
+        identity_output.push_str(
+            &read_ssh_command(
+                &mut handle,
+                "show configuration system host-name | display set | no-more",
+            )
+            .await
+            .unwrap_or_default(),
+        );
+        hostname = parse_discovery_hostname(&identity_output);
+    }
+    let _ = handle
+        .disconnect(russh::Disconnect::ByApplication, "Discovery complete", "en")
+        .await;
+    let fingerprint = observed.lock().ok().and_then(|value| value.clone());
+    Ok(DiscoveredSshDevice {
+        address: target,
+        hostname,
+        platform: parse_discovery_platform(&identity_output),
+        fingerprint,
         elapsed_ms: started.elapsed().as_millis(),
     })
 }

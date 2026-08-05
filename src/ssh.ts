@@ -9,6 +9,14 @@ export interface ConnectionPreflightResult {
   elapsedMs: number;
 }
 
+export interface DiscoveredSshDevice {
+  address: string;
+  hostname: string | null;
+  platform: string | null;
+  fingerprint: string | null;
+  elapsedMs: number;
+}
+
 export interface TerminalEvent {
   sessionId: string;
   kind: "connected" | "data" | "info" | "error" | "closed";
@@ -33,6 +41,11 @@ export async function listSerialPorts(): Promise<SerialPortInfo[]> {
 
 export async function probeSshHostKey(target: string, port: number): Promise<{ fingerprint: string; legacyRsa: boolean; legacyKex: boolean }> {
   return invoke<{ fingerprint: string; legacyRsa: boolean; legacyKex: boolean }>("probe_ssh_host_key", { target, port });
+}
+
+export async function discoverSshDevice(target: string, port: number, credentialId: string, username: string): Promise<DiscoveredSshDevice> {
+  if (!isTauri()) throw new Error("Device discovery is available in the desktop app");
+  return invoke<DiscoveredSshDevice>("discover_ssh_device", { target, port, credentialId, username });
 }
 
 export async function startTerminalSession(options: {

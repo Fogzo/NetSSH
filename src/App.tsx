@@ -26,6 +26,7 @@ import { TopologyDesigner } from "./TopologyDesigner";
 import { fetchSecurityAdvisories, openSecurityAdvisory, securityFeedFallback, type SecurityAdvisory } from "./securityFeed";
 import { findCiscoCommandSuggestions, type CiscoCommandSuggestion } from "./ciscoCommands";
 import { EngineerNotes } from "./EngineerNotes";
+import { DeviceDiscoveryModal } from "./DeviceDiscovery";
 import type { AiMessage, AiProvider, CommandSnippet, ConnectionHistory, ConnectionProtocol, CredentialProfile, DeviceRole, Host, Session, TerminalLine, View } from "./types";
 import packageMetadata from "../package.json";
 
@@ -179,6 +180,7 @@ function App() {
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [toast, setToast] = useState("");
   const [addDeviceOpen, setAddDeviceOpen] = useState(false);
+  const [deviceDiscoveryOpen, setDeviceDiscoveryOpen] = useState(false);
   const [editingHost, setEditingHost] = useState<Host | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sessionTransferOpen, setSessionTransferOpen] = useState(false);
@@ -286,6 +288,23 @@ function App() {
     setCredentialProfiles(nextProfiles);
     setDeviceHosts(nextHosts);
     return { added, duplicates, profiles: nextProfiles.length - credentialProfiles.length };
+  };
+
+  const importDiscoveredHosts = (discovered: Host[]) => {
+    const nextHosts = [...deviceHosts];
+    let added = 0;
+    let duplicates = 0;
+    for (const host of discovered) {
+      const duplicate = nextHosts.some((existing) => existing.address.toLowerCase() === host.address.toLowerCase() && (existing.protocol ?? "ssh") === "ssh" && (existing.port ?? 22) === (host.port ?? 22));
+      if (duplicate) { duplicates += 1; continue; }
+      nextHosts.unshift(host);
+      added += 1;
+    }
+    setDeviceHosts(nextHosts);
+    setDeviceDiscoveryOpen(false);
+    setView("inventory");
+    notify(`${added} discovered device${added === 1 ? "" : "s"} added${duplicates ? ` · ${duplicates} duplicate${duplicates === 1 ? "" : "s"} skipped` : ""}`);
+    return { added, duplicates };
   };
 
   const startNativeSession = async (id: string, host: Host, username = "", password?: string, reconnecting = false): Promise<string | null> => {
@@ -536,6 +555,7 @@ function App() {
       <main className={`main ${sidebarOpen ? "" : "main-expanded"}`}>
         <Topbar view={view} onSearch={() => setSearchOpen(true)} notifications={notifications} notificationsOpen={notificationsOpen} onToggleNotifications={() => { setNotificationsOpen((open) => !open); setSettingsOpen(false); setNotifications((current) => current.map((item) => ({ ...item, read: true }))); }} onClearNotifications={() => setNotifications([])} onOpenSettings={() => { setSettingsOpen(true); setNotificationsOpen(false); }} />
         <div className="content">
+          {view === "inventory" && <div className="inventory-discovery-launcher"><button className="secondary-button" onClick={() => setDeviceDiscoveryOpen(true)}><Network size={15} /> Discover device range</button></div>}
           {view === "workspace" && (
             <Workspace sessions={sessions} activeId={activeSession} session={currentSession} hosts={deviceHosts} userName={userProfile.name} autocompleteEnabled={preferences.cliAutocomplete} onAuthenticate={authenticateSession} onReconnect={reconnectSession} onActivate={setActiveSession} onClose={closeSession} onCloseMany={closeSessions} onConnect={connect} onNewSession={(host) => connect(host, true)} onCommand={appendLines} onTerminalData={sendTerminalData} onAddDevice={() => setAddDeviceOpen(true)} onShowInventory={() => setView("inventory")} notify={notify} />
           )}
@@ -572,6 +592,7 @@ function App() {
         setAddDeviceOpen(false); setEditingHost(null); setView("inventory");
       }} />}
       {settingsOpen && <SettingsModal preferences={preferences} onClose={() => setSettingsOpen(false)} onSave={(next) => { setPreferences(next); setSettingsOpen(false); notify("Settings saved"); }} />}
+      {deviceDiscoveryOpen && <DeviceDiscoveryModal credentialProfiles={credentialProfiles} configuredSites={preferences.sites} existingHosts={deviceHosts} onClose={() => setDeviceDiscoveryOpen(false)} onImport={importDiscoveredHosts} />}
       {onboardingOpen && <UserProfileModal profile={userProfile} onboarding onClose={() => setOnboardingOpen(false)} onSave={(profile) => { setUserProfile(profile); setOnboardingOpen(false); notify(`Welcome to NetSSH, ${profile.name.split(" ")[0]}`); }} />}
       {profileEditorOpen && <UserProfileModal profile={userProfile} onClose={() => setProfileEditorOpen(false)} onReset={() => { setUserProfile(defaultUserProfile); setProfileEditorOpen(false); setOnboardingOpen(true); }} onSave={(profile) => { setUserProfile(profile); setProfileEditorOpen(false); notify("Profile updated"); }} />}
       {sessionTransferOpen && <SessionTransferModal hosts={deviceHosts} credentialProfiles={credentialProfiles} configuredSites={preferences.sites} onClose={() => setSessionTransferOpen(false)} onImport={importDeviceSessions} notify={notify} />}
