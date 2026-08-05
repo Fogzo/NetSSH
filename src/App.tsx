@@ -293,18 +293,39 @@ function App() {
   const importDiscoveredHosts = (discovered: Host[]) => {
     const nextHosts = [...deviceHosts];
     let added = 0;
+    let updated = 0;
     let duplicates = 0;
     for (const host of discovered) {
-      const duplicate = nextHosts.some((existing) => existing.address.toLowerCase() === host.address.toLowerCase() && (existing.protocol ?? "ssh") === "ssh" && (existing.port ?? 22) === (host.port ?? 22));
-      if (duplicate) { duplicates += 1; continue; }
+      const duplicateIndex = nextHosts.findIndex((existing) => existing.address.toLowerCase() === host.address.toLowerCase() && (existing.protocol ?? "ssh") === "ssh" && (existing.port ?? 22) === (host.port ?? 22));
+      if (duplicateIndex >= 0) {
+        const existing = nextHosts[duplicateIndex];
+        const discoveredHostname = host.name.trim();
+        const discoveredPlatform = host.platform.trim();
+        const nameIsAddress = !existing.name.trim() || existing.name.trim().toLowerCase() === existing.address.trim().toLowerCase();
+        const platformIsGeneric = !existing.platform.trim() || existing.platform.trim().toLowerCase() === "other";
+        const merged = {
+          ...existing,
+          ...(nameIsAddress && discoveredHostname && discoveredHostname.toLowerCase() !== host.address.toLowerCase() ? { name: discoveredHostname } : {}),
+          ...(platformIsGeneric && discoveredPlatform && discoveredPlatform.toLowerCase() !== "other" ? { platform: discoveredPlatform } : {}),
+          ...(existing.credentialId ? {} : host.credentialId ? { credentialId: host.credentialId } : {}),
+          ...(host.latency != null ? { latency: host.latency, status: "online" as const } : {}),
+        };
+        if (merged.name !== existing.name || merged.platform !== existing.platform || merged.credentialId !== existing.credentialId || merged.latency !== existing.latency || merged.status !== existing.status) {
+          nextHosts[duplicateIndex] = merged;
+          updated += 1;
+        } else {
+          duplicates += 1;
+        }
+        continue;
+      }
       nextHosts.unshift(host);
       added += 1;
     }
     setDeviceHosts(nextHosts);
     setDeviceDiscoveryOpen(false);
     setView("inventory");
-    notify(`${added} discovered device${added === 1 ? "" : "s"} added${duplicates ? ` · ${duplicates} duplicate${duplicates === 1 ? "" : "s"} skipped` : ""}`);
-    return { added, duplicates };
+    notify(`${added} discovered device${added === 1 ? "" : "s"} added${updated ? ` · ${updated} existing device${updated === 1 ? "" : "s"} updated` : ""}${duplicates ? ` · ${duplicates} duplicate${duplicates === 1 ? "" : "s"} skipped` : ""}`);
+    return { added, duplicates, updated };
   };
 
   const startNativeSession = async (id: string, host: Host, username = "", password?: string, reconnecting = false): Promise<string | null> => {
@@ -981,6 +1002,7 @@ function Terminal({ session, onData, onAuthenticate, onReconnect, autocompleteEn
 function InteractiveTerminal({ session, onData, onReconnect, autocompleteEnabled, autoFocus = true }: { session: Session; onData: (data: string) => void; onReconnect: () => Promise<void>; autocompleteEnabled: boolean; autoFocus?: boolean }) {
   const hostRef = useRef<HTMLDivElement>(null);
   const autocompleteRef = useRef<HTMLDivElement>(null);
+  const contextMenuRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<XTerm | null>(null);
   const onDataRef = useRef(onData);
   const onReconnectRef = useRef(onReconnect);
@@ -992,6 +1014,7 @@ function InteractiveTerminal({ session, onData, onReconnect, autocompleteEnabled
   const suggestionsRef = useRef<CiscoCommandSuggestion[]>([]);
   const [suggestions, setSuggestions] = useState<CiscoCommandSuggestion[]>([]);
   const [suggestionIndex, setSuggestionIndex] = useState(0);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   onDataRef.current = onData;
   onReconnectRef.current = onReconnect;
   connectedRef.current = session.connected || session.connectionState === "connecting";
@@ -1045,6 +1068,7 @@ function InteractiveTerminal({ session, onData, onReconnect, autocompleteEnabled
     if (!terminal?.hasSelection()) return;
     await writeClipboardText(terminal.getSelection());
     terminal.focus();
+    setContextMenu(null);
   };
 
   const pasteClipboard = async () => {
@@ -1054,9 +1078,16 @@ function InteractiveTerminal({ session, onData, onReconnect, autocompleteEnabled
       const text = await readClipboardText();
       if (text) onDataRef.current(text.replace(/\r?\n/g, "\r"));
       terminal.focus();
+      setContextMenu(null);
     } catch {
       terminal.write("\r\n\x1b[33mClipboard access was not available. Use the operating-system paste shortcut.\x1b[0m\r\n");
     }
+  };
+
+  const selectAll = () => {
+    terminalRef.current?.selectAll();
+    terminalRef.current?.focus();
+    setContextMenu(null);
   };
 
   useEffect(() => {
@@ -1107,6 +1138,9 @@ function InteractiveTerminal({ session, onData, onReconnect, autocompleteEnabled
       }
       else terminal.write("\r\n\x1b[31mThis session is not connected.\x1b[0m\r\n");
     });
+    const selectionSubscription = terminal.onSelectionChange(() => {
+      if (terminal.hasSelection()) void writeClipboardText(terminal.getSelection()).catch(() => undefined);
+    });
     terminal.attachCustomKeyEventHandler((event) => {
       if (event.type !== "keydown") return true;
       const key = event.key.toLowerCase();
@@ -1135,12 +1169,16 @@ function InteractiveTerminal({ session, onData, onReconnect, autocompleteEnabled
         setSuggestions([]);
         return false;
       }
-      if ((event.metaKey || (event.ctrlKey && event.shiftKey)) && key === "c" && terminal.hasSelection()) {
+      if ((event.metaKey || event.ctrlKey) && key === "c" && terminal.hasSelection()) {
         void copySelection();
         return false;
       }
+      if ((event.metaKey || event.ctrlKey) && key === "v") {
+        void pasteClipboard();
+        return false;
+      }
       if ((event.metaKey || (event.ctrlKey && event.shiftKey)) && key === "a") {
-        terminal.selectAll();
+        selectAll();
         return false;
       }
       return true;
@@ -1148,6 +1186,7 @@ function InteractiveTerminal({ session, onData, onReconnect, autocompleteEnabled
     requestAnimationFrame(() => { fit(); if (autoFocus) terminal.focus(); });
     return () => {
       dataSubscription.dispose();
+      selectionSubscription.dispose();
       resizeObserver.disconnect();
       terminal.dispose();
       terminalRef.current = null;
@@ -1171,9 +1210,24 @@ function InteractiveTerminal({ session, onData, onReconnect, autocompleteEnabled
     autocompleteRef.current?.querySelector("button.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [suggestionIndex, suggestions]);
 
+  useEffect(() => {
+    const closeContextMenu = (event: PointerEvent) => {
+      if (!contextMenuRef.current?.contains(event.target as Node)) setContextMenu(null);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setContextMenu(null);
+    };
+    document.addEventListener("pointerdown", closeContextMenu);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeContextMenu);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, []);
+
   const stateLabel = session.connectionState === "connecting" ? "Connecting" : session.connected ? "Connected" : session.connectionState === "error" ? "Error" : "Closed";
   const canReconnect = !session.connected && ["closed", "error"].includes(session.connectionState ?? "");
-  return <div className="terminal terminal-shell"><div className="xterm-host" ref={hostRef} aria-label={`${session.host.name} interactive terminal`} onContextMenu={(event) => { event.preventDefault(); void pasteClipboard(); }} /><div ref={autocompleteRef} className={`terminal-autocomplete ${suggestions.length ? "has-suggestions" : "idle"}`}><div className="terminal-autocomplete-heading"><span><Sparkles size={11} /> Command assist</span><small><kbd>←→</kbd> navigate <kbd>Tab</kbd> accept <kbd>Esc</kbd> close</small></div>{suggestions.length ? suggestions.map((suggestion, index) => <button key={suggestion.command} title={suggestion.description} aria-label={`${suggestion.command}. ${suggestion.description}`} className={index === suggestionIndex ? `active ${suggestion.kind}` : suggestion.kind} onMouseEnter={() => { suggestionRef.current = suggestion; setSuggestionIndex(index); }} onMouseDown={(event) => event.preventDefault()} onClick={() => acceptSuggestion(suggestion)}><Command size={11} /><code>{suggestion.command}</code><em>{suggestion.kind === "show" ? "Read only" : suggestion.kind === "action" ? "Review" : "Configure"}</em></button>) : <span className="terminal-autocomplete-idle">Type a Cisco command or abbreviation · ← → select · Tab accept</span>}</div><div className={`terminal-status ${session.connected ? "connected" : "disconnected"}`}><span><i /> {(session.host.protocol ?? "ssh").toUpperCase()} · {stateLabel}</span>{canReconnect && <span className="terminal-reconnect-hint">Press R or use Reconnect</span>}<span>{autocompleteEnabled ? "Autocomplete on" : "Autocomplete off"}</span><span>xterm-256color</span><span>UTF-8</span><div className="terminal-actions">{canReconnect && <button className="terminal-reconnect-button" type="button" onClick={() => void onReconnect()} title="Reconnect session (R)"><RefreshCw size={11} /> Reconnect</button>}<button type="button" onClick={() => void copySelection()} title="Copy selection (Ctrl+Shift+C / Cmd+C)"><Copy size={11} /> Copy</button><button type="button" onClick={() => void pasteClipboard()} title="Paste (Ctrl+Shift+V / Cmd+V)"><ClipboardPaste size={11} /> Paste</button><button type="button" onClick={() => { terminalRef.current?.clear(); terminalRef.current?.focus(); }} title="Clear local scrollback"><Trash2 size={11} /> Clear</button></div></div></div>;
+  return <div className="terminal terminal-shell"><div className="xterm-host" ref={hostRef} aria-label={`${session.host.name} interactive terminal`} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY }); }} />{contextMenu && <div ref={contextMenuRef} className="terminal-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} role="menu" onContextMenu={(event) => event.preventDefault()}><button type="button" disabled={!terminalRef.current?.hasSelection()} onClick={() => void copySelection()}><Copy size={14} /><span>Copy selection</span><kbd>Ctrl+C</kbd></button><button type="button" disabled={!session.connected} onClick={() => void pasteClipboard()}><ClipboardPaste size={14} /><span>Paste</span><kbd>Ctrl+V</kbd></button><div /><button type="button" onClick={selectAll}><Check size={14} /><span>Select all</span><kbd>Ctrl+Shift+A</kbd></button><button type="button" onClick={() => { terminalRef.current?.clearSelection(); terminalRef.current?.focus(); setContextMenu(null); }}><X size={14} /><span>Clear selection</span></button></div>}<div ref={autocompleteRef} className={`terminal-autocomplete ${suggestions.length ? "has-suggestions" : "idle"}`}><div className="terminal-autocomplete-heading"><span><Sparkles size={11} /> Command assist</span><small><kbd>←→</kbd> navigate <kbd>Tab</kbd> accept <kbd>Esc</kbd> close</small></div>{suggestions.length ? suggestions.map((suggestion, index) => <button key={suggestion.command} title={suggestion.description} aria-label={`${suggestion.command}. ${suggestion.description}`} className={index === suggestionIndex ? `active ${suggestion.kind}` : suggestion.kind} onMouseEnter={() => { suggestionRef.current = suggestion; setSuggestionIndex(index); }} onMouseDown={(event) => event.preventDefault()} onClick={() => acceptSuggestion(suggestion)}><Command size={11} /><code>{suggestion.command}</code><em>{suggestion.kind === "show" ? "Read only" : suggestion.kind === "action" ? "Review" : "Configure"}</em></button>) : <span className="terminal-autocomplete-idle">Type a Cisco command or abbreviation · ← → select · Tab accept</span>}</div><div className={`terminal-status ${session.connected ? "connected" : "disconnected"}`}><span><i /> {(session.host.protocol ?? "ssh").toUpperCase()} · {stateLabel}</span>{canReconnect && <span className="terminal-reconnect-hint">Press R or use Reconnect</span>}<span>{autocompleteEnabled ? "Autocomplete on" : "Autocomplete off"}</span><span>xterm-256color</span><span>UTF-8</span><div className="terminal-actions">{canReconnect && <button className="terminal-reconnect-button" type="button" onClick={() => void onReconnect()} title="Reconnect session (R)"><RefreshCw size={11} /> Reconnect</button>}<button type="button" onClick={() => void copySelection()} title="Copy selection (Ctrl+C / Cmd+C)"><Copy size={11} /> Copy</button><button type="button" onClick={() => void pasteClipboard()} title="Paste (Ctrl+V / Cmd+V)"><ClipboardPaste size={11} /> Paste</button><button type="button" onClick={() => { terminalRef.current?.clear(); terminalRef.current?.focus(); }} title="Clear local scrollback"><Trash2 size={11} /> Clear</button></div></div></div>;
 }
 
 function Inventory({ hosts, onConnect, onAdd, onTransfer, onEdit, onFavorite, onDelete }: { hosts: Host[]; onConnect: (host: Host) => void; onAdd: () => void; onTransfer: () => void; onEdit: (host: Host) => void; onFavorite: (id: string) => void; onDelete: (id: string) => void }) {

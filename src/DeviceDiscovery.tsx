@@ -1,6 +1,6 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Activity, Check, CircleAlert, LockKeyhole, Network, Plus, RefreshCw, ShieldCheck, X } from "lucide-react";
-import { saveCredentialPassword } from "./credentials";
+import { hasCredentialPassword, saveCredentialPassword } from "./credentials";
 import { discoverSshDevice, type DiscoveredSshDevice } from "./ssh";
 import type { CredentialProfile, Host } from "./types";
 
@@ -18,7 +18,7 @@ type DeviceDiscoveryProps = {
   configuredSites: string[];
   existingHosts: Host[];
   onClose: () => void;
-  onImport: (hosts: Host[]) => { added: number; duplicates: number };
+  onImport: (hosts: Host[]) => { added: number; duplicates: number; updated?: number };
 };
 
 function parseIpv4(value: string): number | null {
@@ -73,6 +73,7 @@ export function DeviceDiscoveryModal({ credentialProfiles, configuredSites, exis
   const [password, setPassword] = useState("");
   const [savePassword, setSavePassword] = useState(true);
   const [passwordRequired, setPasswordRequired] = useState(false);
+  const [vaultStatus, setVaultStatus] = useState<"checking" | "stored" | "missing" | "unavailable">("checking");
   const [site, setSite] = useState(configuredSites[0] ?? "");
   const [tags, setTags] = useState("discovered");
   const [rows, setRows] = useState<ScanRow[]>([]);
@@ -93,6 +94,14 @@ export function DeviceDiscoveryModal({ credentialProfiles, configuredSites, exis
   useEffect(() => {
     setPassword("");
     setPasswordRequired(false);
+    if (!credentialId) {
+      setVaultStatus("missing");
+      return;
+    }
+    setVaultStatus("checking");
+    void hasCredentialPassword(credentialId)
+      .then((stored) => setVaultStatus(stored ? "stored" : "missing"))
+      .catch(() => setVaultStatus("unavailable"));
   }, [credentialId]);
 
   const updateRow = (target: string, update: Partial<ScanRow>) => {
@@ -113,6 +122,7 @@ export function DeviceDiscoveryModal({ credentialProfiles, configuredSites, exis
     if (password && savePassword) {
       try {
         await saveCredentialPassword(selectedCredential.id, password);
+        setVaultStatus("stored");
       } catch (caught) {
         setError(cleanError(caught));
         return;
@@ -136,6 +146,7 @@ export function DeviceDiscoveryModal({ credentialProfiles, configuredSites, exis
           const message = cleanError(caught);
           if (/no stored password/i.test(message)) {
             setPasswordRequired(true);
+            setVaultStatus("missing");
             setError(`The selected login password could not be read. Enter it below and scan again, or save it in Credentials.`);
           }
           updateRow(target, { state: "error", error: message, selected: false });
@@ -173,7 +184,7 @@ export function DeviceDiscoveryModal({ credentialProfiles, configuredSites, exis
     });
     if (!hosts.length) { setError("Select at least one successfully identified device."); return; }
     const result = onImport(hosts);
-    setSummary(`${result.added} device${result.added === 1 ? "" : "s"} added${result.duplicates ? ` · ${result.duplicates} duplicate${result.duplicates === 1 ? "" : "s"} skipped` : ""}.`);
+    setSummary(`${result.added} device${result.added === 1 ? "" : "s"} added${result.updated ? ` · ${result.updated} existing device${result.updated === 1 ? "" : "s"} updated` : ""}${result.duplicates ? ` · ${result.duplicates} duplicate${result.duplicates === 1 ? "" : "s"} skipped` : ""}.`);
   };
 
   return <div className="modal-backdrop device-discovery-backdrop" onMouseDown={onClose}>
@@ -183,7 +194,7 @@ export function DeviceDiscoveryModal({ credentialProfiles, configuredSites, exis
         <form className="device-discovery-form" onSubmit={scan}>
           <label className="wide-field"><span>IPv4 range or CIDR *</span><input autoFocus value={range} onChange={(event) => setRange(event.target.value)} placeholder="10.24.10.0/24" /><small>{targetHint}</small></label>
           <label><span>SSH port</span><input inputMode="numeric" value={port} onChange={(event) => setPort(event.target.value)} /></label>
-          <label><span>Saved login *</span><select value={credentialId} onChange={(event) => setCredentialId(event.target.value)} disabled={!credentialProfiles.length}><option value="">{credentialProfiles.length ? "Select a saved login" : "Create a profile in Credentials"}</option>{credentialProfiles.map((credential) => <option value={credential.id} key={credential.id}>{credential.label} · {credential.username}</option>)}</select></label>
+          <label><span>Saved login *</span><select value={credentialId} onChange={(event) => setCredentialId(event.target.value)} disabled={!credentialProfiles.length}><option value="">{credentialProfiles.length ? "Select a saved login" : "Create a profile in Credentials"}</option>{credentialProfiles.map((credential) => <option value={credential.id} key={credential.id}>{credential.label} · {credential.username}</option>)}</select><small>{vaultStatus === "checking" ? "Checking the operating-system vault…" : vaultStatus === "stored" ? "Login password found in the operating-system vault." : vaultStatus === "unavailable" ? "The operating-system vault could not be checked." : "No login password is stored for this profile yet."}</small></label>
           {selectedCredential && passwordRequired && <div className="discovery-password wide-field"><label><span>Login password for {selectedCredential.label}</span><div className="secret-input"><LockKeyhole size={14} /><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" placeholder="Enter password to scan" /></div></label><label className="discovery-save-password"><input type="checkbox" checked={savePassword} onChange={(event) => setSavePassword(event.target.checked)} /><span>Save to the operating-system vault</span></label></div>}
           <label><span>Inventory site *</span><input list="discovery-sites" value={site} onChange={(event) => setSite(event.target.value)} placeholder="London HQ" /><datalist id="discovery-sites">{configuredSites.map((value) => <option value={value} key={value} />)}</datalist></label>
           <label><span>Tags</span><input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="discovered, access" /></label>

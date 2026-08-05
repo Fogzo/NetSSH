@@ -456,19 +456,29 @@ fn discovery_token(value: &str) -> Option<String> {
     Some(value.to_owned())
 }
 
+fn discovery_line_is_generic_hostname(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "device" | "host" | "hostname" | "router" | "switch" | "unknown"
+    )
+}
+
 fn parse_discovery_hostname(output: &str) -> Option<String> {
     for line in output
+        .replace('\r', "")
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
     {
         let lower = line.to_ascii_lowercase();
-        let candidate = if lower.starts_with("hostname ") {
-            line.split_once(char::is_whitespace).map(|(_, value)| value)
-        } else if lower.starts_with("hostname:") || lower.starts_with("host name:") {
-            line.split_once(':').map(|(_, value)| value)
-        } else if lower.contains("hostname is ") {
+        let candidate = if lower.contains("hostname is ") {
             line.get(lower.find("hostname is ").unwrap_or(0) + "hostname is ".len()..)
+        } else if lower.starts_with("hostname") {
+            line.get("hostname".len()..)
+                .map(|value| value.trim().trim_start_matches([':', '=']).trim())
+        } else if lower.starts_with("host name") {
+            line.get("host name".len()..)
+                .map(|value| value.trim().trim_start_matches([':', '=']).trim())
         } else if lower.starts_with("set system host-name ") {
             line.split_whitespace().last()
         } else if lower.starts_with("system name:") {
@@ -481,20 +491,34 @@ fn parse_discovery_hostname(output: &str) -> Option<String> {
                 .map(|index| line.get(..index).unwrap_or_default())
         };
         if let Some(hostname) = candidate.and_then(discovery_token) {
-            return Some(hostname);
+            if !discovery_line_is_generic_hostname(&hostname) {
+                return Some(hostname);
+            }
         }
     }
     None
 }
 
 fn parse_bare_discovery_hostname(output: &str) -> Option<String> {
-    let lines = output
+    let normalized = output.replace('\r', "");
+    let lines = normalized
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>();
     if lines.len() == 1 {
-        return discovery_token(lines[0]);
+        return discovery_token(lines[0])
+            .filter(|hostname| !discovery_line_is_generic_hostname(hostname));
+    }
+    for line in lines {
+        let candidate = line.trim_end_matches(['#', '>']).trim();
+        if candidate != line {
+            if let Some(hostname) = discovery_token(candidate) {
+                if !discovery_line_is_generic_hostname(&hostname) {
+                    return Some(hostname);
+                }
+            }
+        }
     }
     None
 }
@@ -618,12 +642,21 @@ pub async fn discover_ssh_device(
     if hostname.is_none() {
         identity_output.push('\n');
         let config_hostname_output =
-            read_ssh_command(&mut handle, "show running-config | include hostname")
+            read_ssh_command(&mut handle, "show running-config | include ^hostname")
                 .await
                 .unwrap_or_default();
         hostname = parse_discovery_hostname(&config_hostname_output)
             .or_else(|| parse_bare_discovery_hostname(&config_hostname_output));
         identity_output.push_str(&config_hostname_output);
+        if hostname.is_none() {
+            let fallback_hostname_output =
+                read_ssh_command(&mut handle, "show running-config | include hostname")
+                    .await
+                    .unwrap_or_default();
+            hostname = parse_discovery_hostname(&fallback_hostname_output)
+                .or_else(|| parse_bare_discovery_hostname(&fallback_hostname_output));
+            identity_output.push_str(&fallback_hostname_output);
+        }
     }
     if hostname.is_none() {
         identity_output.push('\n');
@@ -1509,8 +1542,16 @@ mod tests {
             Some("ACCESS-SW-02")
         );
         assert_eq!(
+            parse_discovery_hostname("Hostname : ACCESS-SW-04").as_deref(),
+            Some("ACCESS-SW-04")
+        );
+        assert_eq!(
             parse_bare_discovery_hostname("ACCESS-SW-03#\r\n").as_deref(),
             Some("ACCESS-SW-03")
+        );
+        assert_eq!(
+            parse_bare_discovery_hostname("ACCESS-SW-05\r\nACCESS-SW-05#\r\n").as_deref(),
+            Some("ACCESS-SW-05")
         );
     }
 }
