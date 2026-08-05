@@ -7,7 +7,7 @@ import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import {
   Activity, ArrowDownCircle, Bell, Bot, BrainCircuit, Calculator, Check, ChevronDown, ChevronRight, CircleDot, ClipboardCheck, ClipboardPaste,
-  Clock3, Code2, Command, Copy, Database, FileDown, FileUp, Gauge, Globe2, Grid2X2, HardDrive,
+  Clock3, Code2, Command, Copy, Database, FileDown, FileText, FileUp, Gauge, Globe2, Grid2X2, HardDrive,
   KeyRound, Layers3, Menu, MoreHorizontal, Network, PanelLeftClose, Pencil, Plus, Rss,
   ExternalLink, Eye, EyeOff, LockKeyhole, Radio, RefreshCw, Router, Search, Send, Server, Settings, ShieldCheck, Sparkles, Star,
   TerminalSquare, Trash2, UserRound, Wifi, Wrench, X, Zap,
@@ -25,6 +25,7 @@ import { createNetSshExport, createSessionCsv, decodeSessionFile, parseSessionIm
 import { TopologyDesigner } from "./TopologyDesigner";
 import { fetchSecurityAdvisories, openSecurityAdvisory, securityFeedFallback, type SecurityAdvisory } from "./securityFeed";
 import { findCiscoCommandSuggestions, type CiscoCommandSuggestion } from "./ciscoCommands";
+import { EngineerNotes } from "./EngineerNotes";
 import type { AiMessage, AiProvider, CommandSnippet, ConnectionHistory, ConnectionProtocol, CredentialProfile, DeviceRole, Host, Session, TerminalLine, View } from "./types";
 import packageMetadata from "../package.json";
 
@@ -36,6 +37,7 @@ const navItems: { id: View; label: string; icon: typeof TerminalSquare }[] = [
   { id: "topology", label: "Topology", icon: Network },
   { id: "toolbox", label: "Toolbox", icon: Wrench },
   { id: "snippets", label: "Snippets", icon: Code2 },
+  { id: "notes", label: "Engineer notes", icon: FileText },
   { id: "assistant", label: "AI assistant", icon: Bot },
 ];
 
@@ -547,6 +549,7 @@ function App() {
             writeTerminal(activeSession, `${snippet.command}${target.host.protocol === "serial" ? "\r" : "\r\n"}`).then(() => notify(`Sent ${snippet.name}`)).catch((caught) => notify(String(caught)));
             setView("workspace");
           }} />}
+          {view === "notes" && <EngineerNotes notify={notify} />}
           {view === "assistant" && <AiAssistant notify={notify} />}
           {view === "favorites" && <Favorites hosts={deviceHosts} onConnect={connect} onFavorite={(id) => setDeviceHosts((current) => current.map((host) => host.id === id ? { ...host, favorite: !host.favorite } : host))} onShowInventory={() => setView("inventory")} />}
           {view === "history" && <History entries={history} hosts={deviceHosts} onConnect={connect} onClear={() => { setHistory([]); notify("Connection history cleared"); }} />}
@@ -602,7 +605,7 @@ function Sidebar({ view, setView, open, setOpen, onSearch, onOpenSettings, onEdi
 }
 
 function Topbar({ view, onSearch, notifications, notificationsOpen, onToggleNotifications, onClearNotifications, onOpenSettings }: { view: View; onSearch: () => void; notifications: AppNotification[]; notificationsOpen: boolean; onToggleNotifications: () => void; onClearNotifications: () => void; onOpenSettings: () => void }) {
-  const titles: Record<View, string> = { workspace: "Workspace", inventory: "Device inventory", topology: "Network topology", toolbox: "Network toolbox", snippets: "Command snippets", assistant: "AI assistant", favorites: "Favourite devices", history: "Connection history", credentials: "Credential vault" };
+  const titles: Record<View, string> = { workspace: "Workspace", inventory: "Device inventory", topology: "Network topology", toolbox: "Network toolbox", snippets: "Command snippets", notes: "Engineer notes", assistant: "AI assistant", favorites: "Favourite devices", history: "Connection history", credentials: "Credential vault" };
   const unread = notifications.filter((item) => !item.read).length;
   return <header className="topbar"><div><h1>{titles[view]}</h1><span className="breadcrumb">NetSSH <ChevronRight size={12} /> {titles[view]}</span></div><div className="top-actions"><button className="mini-search" onClick={onSearch}><Search size={15} /> Quick search</button><div className="top-popover-wrap"><button className={`icon-button ${notificationsOpen ? "active" : ""}`} aria-label="Notifications" onClick={onToggleNotifications}><Bell size={18} />{unread > 0 && <em className="notification-count">{unread}</em>}</button>{notificationsOpen && <NotificationCenter notifications={notifications} onClear={onClearNotifications} />}</div><button className="icon-button" aria-label="Settings" onClick={onOpenSettings}><Settings size={18} /></button></div></header>;
 }
