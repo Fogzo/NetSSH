@@ -1,5 +1,6 @@
-import { FormEvent, useMemo, useState } from "react";
-import { Activity, Check, CircleAlert, Network, Plus, RefreshCw, ShieldCheck, X } from "lucide-react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
+import { Activity, Check, CircleAlert, LockKeyhole, Network, Plus, RefreshCw, ShieldCheck, X } from "lucide-react";
+import { hasCredentialPassword, saveCredentialPassword } from "./credentials";
 import { discoverSshDevice, type DiscoveredSshDevice } from "./ssh";
 import type { CredentialProfile, Host } from "./types";
 
@@ -69,6 +70,9 @@ export function DeviceDiscoveryModal({ credentialProfiles, configuredSites, exis
   const [range, setRange] = useState("");
   const [port, setPort] = useState("22");
   const [credentialId, setCredentialId] = useState(credentialProfiles[0]?.id ?? "");
+  const [password, setPassword] = useState("");
+  const [savePassword, setSavePassword] = useState(true);
+  const [vaultPasswordAvailable, setVaultPasswordAvailable] = useState<boolean | null>(null);
   const [site, setSite] = useState(configuredSites[0] ?? "");
   const [tags, setTags] = useState("discovered");
   const [rows, setRows] = useState<ScanRow[]>([]);
@@ -86,6 +90,19 @@ export function DeviceDiscoveryModal({ credentialProfiles, configuredSites, exis
     catch { return "Up to 256 IPv4 addresses per scan"; }
   }, [range]);
 
+  useEffect(() => {
+    let active = true;
+    setPassword("");
+    setVaultPasswordAvailable(null);
+    if (!credentialId) return () => { active = false; };
+    void hasCredentialPassword(credentialId).then((available) => {
+      if (active) setVaultPasswordAvailable(available);
+    }).catch(() => {
+      if (active) setVaultPasswordAvailable(false);
+    });
+    return () => { active = false; };
+  }, [credentialId]);
+
   const updateRow = (target: string, update: Partial<ScanRow>) => {
     setRows((current) => current.map((row) => row.target === target ? { ...row, ...update } : row));
   };
@@ -101,6 +118,17 @@ export function DeviceDiscoveryModal({ credentialProfiles, configuredSites, exis
     let targets: string[];
     try { targets = expandAddressRange(range); }
     catch (caught) { setError(cleanError(caught)); return; }
+    if (vaultPasswordAvailable === false && !password) { setError(`Enter the login password for ${selectedCredential.label}, or save it in Credentials first.`); return; }
+    if (password && savePassword) {
+      try {
+        await saveCredentialPassword(selectedCredential.id, password);
+        setVaultPasswordAvailable(true);
+      } catch (caught) {
+        setError(cleanError(caught));
+        return;
+      }
+    }
+    const scanPassword = password || undefined;
     const initialRows = targets.map((target) => ({ target, state: "pending" as const, selected: !existingKeys.has(`${target.toLowerCase()}:${numericPort}`), existing: existingKeys.has(`${target.toLowerCase()}:${numericPort}`) }));
     setRows(initialRows);
     setScanning(true);
@@ -112,7 +140,7 @@ export function DeviceDiscoveryModal({ credentialProfiles, configuredSites, exis
         const target = targets[index];
         updateRow(target, { state: "scanning" });
         try {
-          const device = await discoverSshDevice(target, numericPort, selectedCredential.id, selectedCredential.username);
+          const device = await discoverSshDevice(target, numericPort, selectedCredential.id, selectedCredential.username, scanPassword);
           updateRow(target, { state: "success", device });
         } catch (caught) {
           updateRow(target, { state: "error", error: cleanError(caught), selected: false });
@@ -161,11 +189,12 @@ export function DeviceDiscoveryModal({ credentialProfiles, configuredSites, exis
           <label className="wide-field"><span>IPv4 range or CIDR *</span><input autoFocus value={range} onChange={(event) => setRange(event.target.value)} placeholder="10.24.10.0/24" /><small>{targetHint}</small></label>
           <label><span>SSH port</span><input inputMode="numeric" value={port} onChange={(event) => setPort(event.target.value)} /></label>
           <label><span>Saved login *</span><select value={credentialId} onChange={(event) => setCredentialId(event.target.value)} disabled={!credentialProfiles.length}><option value="">{credentialProfiles.length ? "Select a saved login" : "Create a profile in Credentials"}</option>{credentialProfiles.map((credential) => <option value={credential.id} key={credential.id}>{credential.label} · {credential.username}</option>)}</select></label>
+          {selectedCredential && vaultPasswordAvailable === false && <div className="discovery-password wide-field"><label><span>Login password for {selectedCredential.label}</span><div className="secret-input"><LockKeyhole size={14} /><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" placeholder="Enter password to scan" /></div></label><label className="discovery-save-password"><input type="checkbox" checked={savePassword} onChange={(event) => setSavePassword(event.target.checked)} /><span>Save to the operating-system vault</span></label></div>}
           <label><span>Inventory site *</span><input list="discovery-sites" value={site} onChange={(event) => setSite(event.target.value)} placeholder="London HQ" /><datalist id="discovery-sites">{configuredSites.map((value) => <option value={value} key={value} />)}</datalist></label>
           <label><span>Tags</span><input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="discovered, access" /></label>
           {error && <div className="modal-error wide-field">{error}</div>}
-          <div className="discovery-safety wide-field"><ShieldCheck size={15} /><span>Uses the selected vault password and read-only commands only. Host keys are observed during discovery and will still be checked again when you connect.</span></div>
-          <div className="modal-actions wide-field"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={scanning || !credentialProfiles.length}>{scanning ? <><RefreshCw size={15} className="spin" /> Scanning…</> : <><Activity size={15} /> Scan range</>}</button></div>
+          <div className="discovery-safety wide-field"><ShieldCheck size={15} /><span>{vaultPasswordAvailable === true ? "Uses the selected vault password and read-only commands only." : "Enter a password once, or save it in the selected login profile, then discovery will use read-only commands only."} Host keys are observed during discovery and will still be checked again when you connect.</span></div>
+          <div className="modal-actions wide-field"><button type="button" className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" disabled={scanning || !credentialProfiles.length || vaultPasswordAvailable === null}>{scanning ? <><RefreshCw size={15} className="spin" /> Scanning…</> : <><Activity size={15} /> Scan range</>}</button></div>
         </form>
         {rows.length > 0 && <section className="discovery-results"><div className="discovery-results-head"><div><strong>Discovery results</strong><span>{completed} of {rows.length} checked · {successful.length} identified</span></div>{scanning && <RefreshCw size={15} className="spin" />}</div><div className="discovery-result-list">{rows.map((row) => <div className={`discovery-result-row ${row.state}`} key={row.target}><span className="discovery-result-icon">{row.state === "success" ? <Check size={14} /> : row.state === "error" ? <CircleAlert size={14} /> : <RefreshCw size={14} className={row.state === "scanning" ? "spin" : ""} />}</span><div><strong>{row.device?.hostname ?? row.target}</strong><small>{row.target}{row.device?.platform ? ` · ${row.device.platform}` : row.error ? ` · ${row.error}` : row.existing ? " · Already in inventory" : " · Checking SSH and read-only identity commands…"}</small></div>{row.state === "success" && <label className="discovery-select"><input type="checkbox" checked={row.selected} onChange={() => updateRow(row.target, { selected: !row.selected })} /> {row.existing ? "Review" : "Add"}</label>}</div>)}</div><div className="discovery-results-foot"><span>{selectedCount} selected for inventory</span><button className="primary-button" disabled={scanning || !selectedCount} onClick={importDevices}><Plus size={15} /> Add selected devices</button></div></section>}
         {summary && <div className="discovery-summary">{summary}</div>}

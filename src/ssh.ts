@@ -43,9 +43,9 @@ export async function probeSshHostKey(target: string, port: number): Promise<{ f
   return invoke<{ fingerprint: string; legacyRsa: boolean; legacyKex: boolean }>("probe_ssh_host_key", { target, port });
 }
 
-export async function discoverSshDevice(target: string, port: number, credentialId: string, username: string): Promise<DiscoveredSshDevice> {
+export async function discoverSshDevice(target: string, port: number, credentialId: string, username: string, password?: string): Promise<DiscoveredSshDevice> {
   if (!isTauri()) throw new Error("Device discovery is available in the desktop app");
-  return invoke<DiscoveredSshDevice>("discover_ssh_device", { target, port, credentialId, username });
+  return invoke<DiscoveredSshDevice>("discover_ssh_device", { target, port, credentialId, username, password: password ?? null });
 }
 
 export async function startTerminalSession(options: {

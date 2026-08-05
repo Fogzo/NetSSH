@@ -521,6 +521,7 @@ pub async fn discover_ssh_device(
     target: String,
     port: u16,
     username: String,
+    password: Option<String>,
 ) -> Result<DiscoveredSshDevice, String> {
     let started = Instant::now();
     let target = validate_target(&target, "ssh")?;
@@ -533,8 +534,8 @@ pub async fn discover_ssh_device(
     if username.is_empty() {
         return Err("The selected login profile has no username".into());
     }
-    let password = super::resolve_login_password(None, Some(&credential_id), &target)?
-        .ok_or_else(|| "The selected login has no stored password".to_string())?;
+    let password = super::resolve_login_password(password, Some(&credential_id), &credential_id)?
+        .ok_or_else(|| "The selected login has no stored password. Save its password in Credentials before scanning".to_string())?;
 
     let mut legacy_rsa = false;
     let mut legacy_kex = false;
