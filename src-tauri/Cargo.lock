@@ -2832,7 +2832,7 @@ dependencies = [
 
 [[package]]
 name = "netssh"
-version = "0.1.14"
+version = "0.1.15"
 dependencies = [
  "keyring",
  "reqwest 0.12.28",

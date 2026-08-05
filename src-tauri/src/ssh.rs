@@ -443,7 +443,7 @@ async fn read_ssh_command(
 fn discovery_token(value: &str) -> Option<String> {
     let value = value
         .trim()
-        .trim_matches(|character: char| matches!(character, ':' | '=' | '"' | '\''));
+        .trim_matches(|character: char| matches!(character, ':' | '=' | '"' | '\'' | '#' | '>'));
     if value.is_empty()
         || value.len() > 253
         || value.contains(char::is_whitespace)
@@ -473,8 +473,12 @@ fn parse_discovery_hostname(output: &str) -> Option<String> {
             line.split_whitespace().last()
         } else if lower.starts_with("system name:") {
             line.split_once(':').map(|(_, value)| value)
+        } else if lower.starts_with("device name:") {
+            line.split_once(':').map(|(_, value)| value)
         } else {
-            None
+            lower
+                .find(" uptime is ")
+                .map(|index| line.get(..index).unwrap_or_default())
         };
         if let Some(hostname) = candidate.and_then(discovery_token) {
             return Some(hostname);
@@ -496,23 +500,35 @@ fn parse_bare_discovery_hostname(output: &str) -> Option<String> {
 }
 
 fn parse_discovery_platform(output: &str) -> Option<String> {
-    let value = output.to_ascii_lowercase();
-    [
-        ("cisco ios xe", "Cisco IOS-XE"),
-        ("ios-xe", "Cisco IOS-XE"),
-        ("ios software", "Cisco IOS"),
-        ("cisco nexus operating system", "Cisco NX-OS"),
-        ("nx-os", "Cisco NX-OS"),
-        ("arista eos", "Arista EOS"),
-        ("junos", "Juniper JunOS"),
-        ("juniper", "Juniper JunOS"),
-        ("fortios", "Fortinet FortiOS"),
-        ("fortigate", "Fortinet FortiOS"),
-        ("pan-os", "Palo Alto PAN-OS"),
-        ("palo alto", "Palo Alto PAN-OS"),
-    ]
-    .into_iter()
-    .find_map(|(marker, platform)| value.contains(marker).then_some(platform.to_owned()))
+    let value = output.to_ascii_lowercase().replace(['-', '_'], " ");
+    if value.contains("cisco ios xe") || value.contains("ios xe") {
+        return Some("Cisco IOS-XE".into());
+    }
+    if value.contains("cisco nexus operating system")
+        || value.contains("nx os")
+        || value.contains("nexus operating system")
+    {
+        return Some("Cisco NX-OS".into());
+    }
+    if value.contains("cisco ios software") || value.contains("ios software") {
+        return Some("Cisco IOS".into());
+    }
+    if value.contains("arista eos") || value.contains("eos version") {
+        return Some("Arista EOS".into());
+    }
+    if value.contains("junos") || value.contains("juniper") {
+        return Some("Juniper JunOS".into());
+    }
+    if value.contains("fortios") || value.contains("fortigate") {
+        return Some("Fortinet FortiOS".into());
+    }
+    if value.contains("pan os") || value.contains("palo alto") {
+        return Some("Palo Alto PAN-OS".into());
+    }
+    if value.contains("linux") {
+        return Some("Linux".into());
+    }
+    None
 }
 
 #[tauri::command]
@@ -580,11 +596,35 @@ pub async fn discover_ssh_device(
         return Err("SSH authentication was rejected by the device".into());
     }
 
-    let version = read_ssh_command(&mut handle, "show version | no-more")
+    let mut version = read_ssh_command(&mut handle, "show version | no-more")
         .await
         .unwrap_or_default();
+    if version.trim().is_empty() {
+        version = read_ssh_command(&mut handle, "show version")
+            .await
+            .unwrap_or_default();
+    }
     let mut identity_output = version.clone();
     let mut hostname = parse_discovery_hostname(&identity_output);
+    let mut platform = parse_discovery_platform(&identity_output);
+    if platform.is_none() {
+        let system_output = read_ssh_command(&mut handle, "show system information")
+            .await
+            .unwrap_or_default();
+        identity_output.push('\n');
+        identity_output.push_str(&system_output);
+        platform = parse_discovery_platform(&identity_output);
+    }
+    if hostname.is_none() {
+        identity_output.push('\n');
+        let config_hostname_output =
+            read_ssh_command(&mut handle, "show running-config | include hostname")
+                .await
+                .unwrap_or_default();
+        hostname = parse_discovery_hostname(&config_hostname_output)
+            .or_else(|| parse_bare_discovery_hostname(&config_hostname_output));
+        identity_output.push_str(&config_hostname_output);
+    }
     if hostname.is_none() {
         identity_output.push('\n');
         let hostname_output = read_ssh_command(&mut handle, "show hostname")
@@ -613,7 +653,7 @@ pub async fn discover_ssh_device(
     Ok(DiscoveredSshDevice {
         address: target,
         hostname,
-        platform: parse_discovery_platform(&identity_output),
+        platform: platform.or_else(|| parse_discovery_platform(&identity_output)),
         fingerprint,
         elapsed_ms: started.elapsed().as_millis(),
     })
@@ -1447,5 +1487,30 @@ mod tests {
             "no common kex algorithm: ours diffie-hellman-group17-sha512, theirs diffie-hellman-group14-sha1"
         ));
         assert!(no_common_kex_algorithm("No common key exchange algorithm"));
+    }
+
+    #[test]
+    fn discovery_parses_cisco_identity() {
+        let output = "Cisco IOS XE Software, Version 17.12.04\r\nCORE-SW-01 uptime is 18 weeks";
+        assert_eq!(
+            parse_discovery_hostname(output).as_deref(),
+            Some("CORE-SW-01")
+        );
+        assert_eq!(
+            parse_discovery_platform(output).as_deref(),
+            Some("Cisco IOS-XE")
+        );
+    }
+
+    #[test]
+    fn discovery_parses_config_and_prompt_hostnames() {
+        assert_eq!(
+            parse_discovery_hostname("hostname ACCESS-SW-02").as_deref(),
+            Some("ACCESS-SW-02")
+        );
+        assert_eq!(
+            parse_bare_discovery_hostname("ACCESS-SW-03#\r\n").as_deref(),
+            Some("ACCESS-SW-03")
+        );
     }
 }
