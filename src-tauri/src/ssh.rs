@@ -440,6 +440,97 @@ async fn read_ssh_command(
     Ok(String::from_utf8_lossy(&output).to_string())
 }
 
+fn clean_discovery_output(output: &str) -> String {
+    let mut cleaned = String::with_capacity(output.len());
+    let mut characters = output.chars();
+    while let Some(character) = characters.next() {
+        if character != '\x1b' {
+            cleaned.push(character);
+            continue;
+        }
+        match characters.next() {
+            Some('[') => {
+                for sequence_character in characters.by_ref() {
+                    if sequence_character.is_ascii_alphabetic()
+                        || matches!(sequence_character, '@' | '`' | '~')
+                    {
+                        break;
+                    }
+                }
+            }
+            Some(']') => {
+                while let Some(sequence_character) = characters.next() {
+                    if sequence_character == '\x07' {
+                        break;
+                    }
+                    if sequence_character == '\x1b' && characters.next() == Some('\\') {
+                        break;
+                    }
+                }
+            }
+            Some(_) | None => {}
+        }
+    }
+    cleaned
+}
+
+async fn read_ssh_shell_burst(channel: &mut russh::Channel<client::Msg>) -> Result<String, String> {
+    let started = Instant::now();
+    let mut bytes = Vec::new();
+    while started.elapsed() < Duration::from_secs(8) {
+        let wait_for = Duration::from_secs(8)
+            .saturating_sub(started.elapsed())
+            .min(Duration::from_millis(750));
+        match timeout(wait_for, channel.wait()).await {
+            Ok(Some(russh::ChannelMsg::Data { data }))
+            | Ok(Some(russh::ChannelMsg::ExtendedData { data, .. })) => {
+                bytes.extend_from_slice(&data);
+            }
+            Ok(Some(russh::ChannelMsg::Eof | russh::ChannelMsg::Close)) | Ok(None) => break,
+            Ok(Some(_)) => {}
+            Err(_) if !bytes.is_empty() => break,
+            Err(_) => {}
+        }
+    }
+    Ok(clean_discovery_output(&String::from_utf8_lossy(&bytes)))
+}
+
+async fn collect_ssh_shell_discovery(
+    handle: &mut client::Handle<SshHandler>,
+) -> Result<String, String> {
+    let mut channel = handle
+        .channel_open_session()
+        .await
+        .map_err(|error| format!("Unable to open the interactive discovery channel: {error}"))?;
+    channel
+        .request_pty(false, "xterm-256color", 160, 48, 0, 0, &[])
+        .await
+        .map_err(|error| format!("The device rejected the discovery terminal: {error}"))?;
+    channel
+        .request_shell(false)
+        .await
+        .map_err(|error| format!("The device rejected the discovery shell: {error}"))?;
+
+    let mut output = read_ssh_shell_burst(&mut channel).await?;
+    for command in [
+        "show version",
+        "show running-config | include ^hostname",
+        "show running-config | include hostname",
+        "show hostname",
+        "show system information",
+        "show configuration system host-name | display set | no-more",
+    ] {
+        channel
+            .data_bytes(format!("{command}\r"))
+            .await
+            .map_err(|error| format!("The device rejected discovery command {command}: {error}"))?;
+        output.push('\n');
+        output.push_str(&read_ssh_shell_burst(&mut channel).await?);
+    }
+    let _ = channel.close().await;
+    Ok(output)
+}
+
 fn discovery_token(value: &str) -> Option<String> {
     let value = value
         .trim()
@@ -464,8 +555,8 @@ fn discovery_line_is_generic_hostname(value: &str) -> bool {
 }
 
 fn parse_discovery_hostname(output: &str) -> Option<String> {
-    for line in output
-        .replace('\r', "")
+    let normalized = clean_discovery_output(output).replace('\r', "");
+    for line in normalized
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty())
@@ -500,7 +591,7 @@ fn parse_discovery_hostname(output: &str) -> Option<String> {
 }
 
 fn parse_bare_discovery_hostname(output: &str) -> Option<String> {
-    let normalized = output.replace('\r', "");
+    let normalized = clean_discovery_output(output).replace('\r', "");
     let lines = normalized
         .lines()
         .map(str::trim)
@@ -524,7 +615,9 @@ fn parse_bare_discovery_hostname(output: &str) -> Option<String> {
 }
 
 fn parse_discovery_platform(output: &str) -> Option<String> {
-    let value = output.to_ascii_lowercase().replace(['-', '_'], " ");
+    let value = clean_discovery_output(output)
+        .to_ascii_lowercase()
+        .replace(['-', '_'], " ");
     if value.contains("cisco ios xe") || value.contains("ios xe") {
         return Some("Cisco IOS-XE".into());
     }
@@ -620,16 +713,22 @@ pub async fn discover_ssh_device(
         return Err("SSH authentication was rejected by the device".into());
     }
 
-    let mut version = read_ssh_command(&mut handle, "show version | no-more")
+    let mut identity_output = collect_ssh_shell_discovery(&mut handle)
         .await
         .unwrap_or_default();
-    if version.trim().is_empty() {
-        version = read_ssh_command(&mut handle, "show version")
+    if identity_output.trim().is_empty() {
+        let mut version = read_ssh_command(&mut handle, "show version | no-more")
             .await
             .unwrap_or_default();
+        if version.trim().is_empty() {
+            version = read_ssh_command(&mut handle, "show version")
+                .await
+                .unwrap_or_default();
+        }
+        identity_output = version;
     }
-    let mut identity_output = version.clone();
-    let mut hostname = parse_discovery_hostname(&identity_output);
+    let mut hostname = parse_discovery_hostname(&identity_output)
+        .or_else(|| parse_bare_discovery_hostname(&identity_output));
     let mut platform = parse_discovery_platform(&identity_output);
     if platform.is_none() {
         let system_output = read_ssh_command(&mut handle, "show system information")
@@ -1531,6 +1630,15 @@ mod tests {
         );
         assert_eq!(
             parse_discovery_platform(output).as_deref(),
+            Some("Cisco IOS-XE")
+        );
+        let terminal_output = "\x1b[2J\x1b[HCORE-SW-02#show version\r\nCisco IOS XE Software, Version 17.12.04\r\nCORE-SW-02#";
+        assert_eq!(
+            parse_bare_discovery_hostname(terminal_output).as_deref(),
+            Some("CORE-SW-02")
+        );
+        assert_eq!(
+            parse_discovery_platform(terminal_output).as_deref(),
             Some("Cisco IOS-XE")
         );
     }
