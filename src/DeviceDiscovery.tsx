@@ -2,7 +2,19 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { Activity, Check, CircleAlert, LockKeyhole, Network, Plus, RefreshCw, ShieldCheck, X } from "lucide-react";
 import { hasCredentialPassword, saveCredentialPassword } from "./credentials";
 import { discoverSshDevice, type DiscoveredSshDevice } from "./ssh";
-import type { CredentialProfile, Host } from "./types";
+import type { CredentialProfile, DeviceRole, Host } from "./types";
+
+const discoveryRoles: [DeviceRole, string][] = [
+  ["core", "Core"],
+  ["distribution", "Distribution"],
+  ["access", "Access"],
+  ["router", "Router"],
+  ["firewall", "Firewall"],
+  ["wireless-controller", "Wireless controller"],
+  ["access-point", "Access point"],
+  ["server", "Server"],
+  ["other", "Other"],
+];
 
 type ScanRow = {
   target: string;
@@ -75,6 +87,7 @@ export function DeviceDiscoveryModal({ credentialProfiles, configuredSites, exis
   const [passwordRequired, setPasswordRequired] = useState(false);
   const [vaultStatus, setVaultStatus] = useState<"checking" | "stored" | "missing" | "unavailable">("checking");
   const [site, setSite] = useState(configuredSites[0] ?? "");
+  const [deviceRole, setDeviceRole] = useState<DeviceRole>("other");
   const [tags, setTags] = useState("discovered");
   const [rows, setRows] = useState<ScanRow[]>([]);
   const [scanning, setScanning] = useState(false);
@@ -170,7 +183,7 @@ export function DeviceDiscoveryModal({ credentialProfiles, configuredSites, exis
         address: device.address,
         platform: device.platform ?? "Other",
         site: site.trim(),
-        deviceRole: "other" as const,
+        deviceRole,
         status: "online" as const,
         latency: device.elapsedMs,
         favorite: false,
@@ -197,6 +210,7 @@ export function DeviceDiscoveryModal({ credentialProfiles, configuredSites, exis
           <label><span>Saved login *</span><select value={credentialId} onChange={(event) => setCredentialId(event.target.value)} disabled={!credentialProfiles.length}><option value="">{credentialProfiles.length ? "Select a saved login" : "Create a profile in Credentials"}</option>{credentialProfiles.map((credential) => <option value={credential.id} key={credential.id}>{credential.label} · {credential.username}</option>)}</select><small>{vaultStatus === "checking" ? "Checking the operating-system vault…" : vaultStatus === "stored" ? "Login password found in the operating-system vault." : vaultStatus === "unavailable" ? "The operating-system vault could not be checked." : "No login password is stored for this profile yet."}</small></label>
           {selectedCredential && passwordRequired && <div className="discovery-password wide-field"><label><span>Login password for {selectedCredential.label}</span><div className="secret-input"><LockKeyhole size={14} /><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="current-password" placeholder="Enter password to scan" /></div></label><label className="discovery-save-password"><input type="checkbox" checked={savePassword} onChange={(event) => setSavePassword(event.target.checked)} /><span>Save to the operating-system vault</span></label></div>}
           <label><span>Inventory site *</span><input list="discovery-sites" value={site} onChange={(event) => setSite(event.target.value)} placeholder="London HQ" /><datalist id="discovery-sites">{configuredSites.map((value) => <option value={value} key={value} />)}</datalist></label>
+          <label><span>Inventory role *</span><select value={deviceRole} onChange={(event) => setDeviceRole(event.target.value as DeviceRole)}>{discoveryRoles.map(([value, label]) => <option value={value} key={value}>{label}</option>)}</select></label>
           <label><span>Tags</span><input value={tags} onChange={(event) => setTags(event.target.value)} placeholder="discovered, access" /></label>
           {error && <div className="modal-error wide-field">{error}</div>}
           <div className="discovery-safety wide-field"><ShieldCheck size={15} /><span>{passwordRequired ? "The selected login was tried first; enter a password below if the vault lookup failed." : "The selected login profile will be used from the operating-system vault first."} Discovery uses read-only commands only. Host keys are observed during discovery and will still be checked again when you connect.</span></div>
