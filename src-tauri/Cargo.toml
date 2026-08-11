@@ -1,6 +1,6 @@
 [package]
 name = "netssh"
-version = "0.1.19"
+version = "0.1.20"
 description = "A modern SSH workspace for network engineers"
 authors = ["NetSSH"]
 edition = "2021"

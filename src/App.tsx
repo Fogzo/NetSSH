@@ -170,6 +170,11 @@ function App() {
       return import.meta.env.DEV ? [...ciscoDemoHosts, ...initialHosts] : initialHosts;
     }
   });
+  const deviceHostsRef = useRef(deviceHosts);
+  const reachabilityInFlightRef = useRef(false);
+  const [reachabilityRefreshing, setReachabilityRefreshing] = useState(false);
+  const [reachabilityLastChecked, setReachabilityLastChecked] = useState<number | null>(null);
+  deviceHostsRef.current = deviceHosts;
   const [credentialProfiles, setCredentialProfiles] = useState<CredentialProfile[]>(() => {
     try { return JSON.parse(localStorage.getItem("netssh.credentialProfiles") ?? "[]") as CredentialProfile[]; }
     catch { return []; }
@@ -216,6 +221,48 @@ function App() {
       return [];
     }
   });
+
+  const refreshReachability = useCallback(async () => {
+    if (reachabilityInFlightRef.current) return;
+    const targets = deviceHostsRef.current.filter((host) => !host.demoProfile);
+    if (!targets.length) {
+      setReachabilityLastChecked(Date.now());
+      return;
+    }
+    reachabilityInFlightRef.current = true;
+    setReachabilityRefreshing(true);
+    try {
+      const checks: Array<{ id: string; status: Host["status"]; latency: number | null }> = await Promise.all(targets.map(async (host) => {
+        const protocol = host.protocol ?? "ssh";
+        try {
+          const result = await preflightConnection(protocol, host.address, protocol === "serial" ? undefined : host.port ?? (protocol === "telnet" ? 23 : 22), host.baudRate);
+          return { id: host.id, status: result.reachable ? "online" : "offline", latency: result.reachable ? Math.max(1, Math.round(result.elapsedMs)) : null };
+        } catch {
+          return { id: host.id, status: "offline", latency: null };
+        }
+      }));
+      const byId = new Map(checks.map((check) => [check.id, check]));
+      setDeviceHosts((current) => current.map((host) => {
+        const check = byId.get(host.id);
+        return check ? { ...host, status: check.status, latency: check.latency } : host;
+      }));
+      setReachabilityLastChecked(Date.now());
+    } finally {
+      reachabilityInFlightRef.current = false;
+      setReachabilityRefreshing(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    const initialCheck = window.setTimeout(() => { void refreshReachability(); }, 800);
+    const interval = window.setInterval(() => {
+      if (!document.hidden) void refreshReachability();
+    }, 45_000);
+    return () => {
+      window.clearTimeout(initialCheck);
+      window.clearInterval(interval);
+    };
+  }, [refreshReachability]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -602,9 +649,9 @@ function App() {
       <main className={`main ${sidebarOpen ? "" : "main-expanded"}`}>
         <Topbar view={view} onSearch={() => setSearchOpen(true)} notifications={notifications} notificationsOpen={notificationsOpen} onToggleNotifications={() => { setNotificationsOpen((open) => !open); setSettingsOpen(false); setNotifications((current) => current.map((item) => ({ ...item, read: true }))); }} onClearNotifications={() => setNotifications([])} onOpenSettings={() => { setSettingsOpen(true); setNotificationsOpen(false); }} />
         <div className="content">
-          {view === "inventory" && <div className="inventory-discovery-launcher"><button className="secondary-button" onClick={() => setDeviceDiscoveryOpen(true)}><Network size={15} /> Discover device range</button></div>}
+          {view === "inventory" && <div className="inventory-discovery-launcher"><button className="secondary-button" onClick={() => void refreshReachability()} disabled={reachabilityRefreshing}><RefreshCw size={15} className={reachabilityRefreshing ? "spin" : ""} /> {reachabilityRefreshing ? "Checking reachability…" : "Check reachability"}</button><button className="secondary-button" onClick={() => setDeviceDiscoveryOpen(true)}><Network size={15} /> Discover device range</button></div>}
           {view === "workspace" && (
-            <Workspace sessions={sessions} activeId={activeSession} session={currentSession} hosts={deviceHosts} userName={userProfile.name} autocompleteEnabled={preferences.cliAutocomplete} onAuthenticate={authenticateSession} onReconnect={reconnectSession} onActivate={setActiveSession} onClose={closeSession} onCloseMany={closeSessions} onConnect={connect} onNewSession={(host) => connect(host, true)} onCommand={appendLines} onTerminalData={sendTerminalData} onAddDevice={() => setAddDeviceOpen(true)} onShowInventory={() => setView("inventory")} notify={notify} />
+            <Workspace sessions={sessions} activeId={activeSession} session={currentSession} hosts={deviceHosts} userName={userProfile.name} autocompleteEnabled={preferences.cliAutocomplete} onAuthenticate={authenticateSession} onReconnect={reconnectSession} onActivate={setActiveSession} onClose={closeSession} onCloseMany={closeSessions} onConnect={connect} onNewSession={(host) => connect(host, true)} onCommand={appendLines} onTerminalData={sendTerminalData} onAddDevice={() => setAddDeviceOpen(true)} onShowInventory={() => setView("inventory")} onRefreshReachability={refreshReachability} reachabilityRefreshing={reachabilityRefreshing} reachabilityLastChecked={reachabilityLastChecked} notify={notify} />
           )}
           {view === "inventory" && <Inventory hosts={deviceHosts} onConnect={connect} onAdd={() => setAddDeviceOpen(true)} onTransfer={() => setSessionTransferOpen(true)} onEdit={setEditingHost} onFavorite={(id) => setDeviceHosts((current) => current.map((host) => host.id === id ? { ...host, favorite: !host.favorite } : host))} onDelete={(id) => { setDeviceHosts((current) => current.filter((host) => host.id !== id)); deleteDevicePassword(id).catch(() => undefined); notify("Device removed"); }} />}
           {view === "topology" && <TopologyDesigner hosts={deviceHosts} onConnect={(host) => { setView("workspace"); void connect(host); }} notify={notify} />}
@@ -820,7 +867,7 @@ function SessionConnectionBadges({ session, compact = false }: { session: Sessio
   return <div className={`session-connection-badges ${compact ? "compact" : ""}`}><span className={`terminal-info-badge ${connectionTone}`}><CircleDot size={10} />{stateLabel}</span><span className={`terminal-info-badge protocol ${protocol}`}><ShieldCheck size={10} />{protocol === "ssh" ? "SSH encrypted" : protocol === "telnet" ? "Telnet unencrypted" : "Local serial"}</span><span className={`terminal-info-badge ${session.host.status === "online" ? "good" : session.host.status === "warning" ? "pending" : "bad"}`}><Router size={10} />{statusLabel[session.host.status]}</span>{session.host.latency != null && <span className={`terminal-info-badge latency-badge ${latencyTone}`}><Activity size={10} />{session.host.latency} ms</span>}</div>;
 }
 
-function Workspace({ sessions, activeId, session, hosts, userName, autocompleteEnabled, onAuthenticate, onReconnect, onActivate, onClose, onCloseMany, onConnect, onNewSession, onCommand, onTerminalData, onAddDevice, onShowInventory, notify }: { sessions: Session[]; activeId: string | null; session?: Session; hosts: Host[]; userName: string; autocompleteEnabled: boolean; onAuthenticate: (id: string, credentials: ConnectionCredentials) => Promise<void>; onReconnect: (id: string) => Promise<void>; onActivate: (id: string) => void; onClose: (id: string) => void; onCloseMany: (ids: string[]) => void; onConnect: (host: Host) => void; onNewSession: (host: Host) => Promise<string | null>; onCommand: (id: string, lines: TerminalLine[]) => void; onTerminalData: (id: string, data: string) => void; onAddDevice: () => void; onShowInventory: () => void; notify: (message: string) => void }) {
+function Workspace({ sessions, activeId, session, hosts, userName, autocompleteEnabled, onAuthenticate, onReconnect, onActivate, onClose, onCloseMany, onConnect, onNewSession, onCommand, onTerminalData, onAddDevice, onShowInventory, onRefreshReachability, reachabilityRefreshing, reachabilityLastChecked, notify }: { sessions: Session[]; activeId: string | null; session?: Session; hosts: Host[]; userName: string; autocompleteEnabled: boolean; onAuthenticate: (id: string, credentials: ConnectionCredentials) => Promise<void>; onReconnect: (id: string) => Promise<void>; onActivate: (id: string) => void; onClose: (id: string) => void; onCloseMany: (ids: string[]) => void; onConnect: (host: Host) => void; onNewSession: (host: Host) => Promise<string | null>; onCommand: (id: string, lines: TerminalLine[]) => void; onTerminalData: (id: string, data: string) => void; onAddDevice: () => void; onShowInventory: () => void; onRefreshReachability: () => Promise<void>; reachabilityRefreshing: boolean; reachabilityLastChecked: number | null; notify: (message: string) => void }) {
   const [layout, setLayout] = useState<"single" | "split" | "ai">("single");
   const [primaryId, setPrimaryId] = useState<string | null>(activeId);
   const [secondaryId, setSecondaryId] = useState<string | null>(null);
@@ -857,7 +904,7 @@ function Workspace({ sessions, activeId, session, hosts, userName, autocompleteE
     window.addEventListener("keydown", closeOnEscape);
     return () => { window.removeEventListener("click", closeMenu); window.removeEventListener("blur", closeMenu); window.removeEventListener("keydown", closeOnEscape); };
   }, [tabContextMenu]);
-  if (!session || !primary) return <WorkspaceHome hosts={hosts} userName={userName} onConnect={onConnect} onAddDevice={onAddDevice} onShowInventory={onShowInventory} />;
+  if (!session || !primary) return <WorkspaceHome hosts={hosts} userName={userName} onConnect={onConnect} onAddDevice={onAddDevice} onShowInventory={onShowInventory} onRefreshReachability={onRefreshReachability} reachabilityRefreshing={reachabilityRefreshing} reachabilityLastChecked={reachabilityLastChecked} />;
   const toggleSplit = () => {
     if (layout === "split") { setLayout("single"); return; }
     const available = sessions.find((item) => item.id !== primary.id);
@@ -962,10 +1009,15 @@ function AiSidePanel({ session, notify, onWebModeChange }: { session: Session; n
   return <aside className="workspace-ai"><div className="workspace-ai-head"><div><span><BrainCircuit size={16} /></span><div><strong>Network copilot</strong><small>Beside {session.host.name}</small></div></div><div className="provider-select"><span className="provider-dot" style={{ background: aiProviders[webProvider ?? provider].accent }} /><select value={webProvider ? `${webProvider}-web` : provider} onChange={(event) => selectProvider(event.target.value)} aria-label="Side panel AI provider"><option value="demo">Demo</option><option value="openai">OpenAI API</option><option value="gemini">Gemini API</option><option value="openai-web">ChatGPT Web</option><option value="gemini-web">Gemini Web</option></select><ChevronDown size={13} /></div></div>{webProvider ? <EmbeddedProviderView provider={webProvider} notify={notify} compact onExternal={() => setWebProvider(null)} /> : <><div className="workspace-ai-notice"><ShieldCheck size={13} />Session output is excluded unless you enable context.</div><div className="side-chat-scroll">{messages.map((message) => <ChatMessage key={message.id} message={message} provider={provider} />)}{sending && <div className="chat-message assistant-message"><span className="message-avatar"><Bot size={15} /></span><div className="message-bubble typing"><i /><i /><i /></div></div>}<div ref={bottomRef} /></div><form className="side-composer" onSubmit={submit}><textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Ask about this session…" rows={3} /><label><input type="checkbox" checked={attachContext} onChange={(event) => setAttachContext(event.target.checked)} /><span><Layers3 size={12} /> Include recent session context</span></label><button className="primary-button" disabled={!draft.trim() || sending}><Send size={14} /> Send</button></form></>}</aside>;
 }
 
-function WorkspaceHome({ hosts, userName, onConnect, onAddDevice, onShowInventory }: { hosts: Host[]; userName: string; onConnect: (host: Host) => void; onAddDevice: () => void; onShowInventory: () => void }) {
+function WorkspaceHome({ hosts, userName, onConnect, onAddDevice, onShowInventory, onRefreshReachability, reachabilityRefreshing, reachabilityLastChecked }: { hosts: Host[]; userName: string; onConnect: (host: Host) => void; onAddDevice: () => void; onShowInventory: () => void; onRefreshReachability: () => Promise<void>; reachabilityRefreshing: boolean; reachabilityLastChecked: number | null }) {
   const [advisories, setAdvisories] = useState<SecurityAdvisory[]>(securityFeedFallback);
   const [feedLoading, setFeedLoading] = useState(true);
   const [feedStatus, setFeedStatus] = useState("Loading official feeds");
+  const reachableCount = hosts.filter((host) => host.status === "online").length;
+  const attentionCount = hosts.filter((host) => host.status !== "online").length;
+  const latencies = hosts.map((host) => host.latency).filter((latency): latency is number => latency != null);
+  const averageLatency = latencies.length ? `${Math.round(latencies.reduce((total, latency) => total + latency, 0) / latencies.length)} ms` : "—";
+  const pulseStatus = reachabilityRefreshing ? "Checking reachability…" : reachabilityLastChecked ? `Checked ${new Date(reachabilityLastChecked).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Waiting for first check";
   const refreshFeed = async () => {
     setFeedLoading(true);
     try {
@@ -998,7 +1050,7 @@ function WorkspaceHome({ hosts, userName, onConnect, onAddDevice, onShowInventor
       <div className="section-heading"><div><h3>Jump back in</h3><p>Your recently accessed devices</p></div><button onClick={onShowInventory}>View inventory <ChevronRight size={15} /></button></div>
       <div className="device-grid">{hosts.slice(0, 4).map((host) => <DeviceCard key={host.id} host={host} onConnect={onConnect} />)}</div>
       <div className="dashboard-grid">
-        <section className="panel activity-panel"><div className="panel-title"><div><h3>Network pulse</h3><p>Live overview</p></div><span className="live-pill"><i /> Live</span></div><div className="metrics"><Metric icon={Gauge} value="99.7%" label="Availability" trend="+0.2%" /><Metric icon={Activity} value="18 ms" label="Avg latency" trend="-3 ms" /><Metric icon={Server} value="5 / 6" label="Reachable" trend="1 alert" warning /></div></section>
+        <section className="panel activity-panel"><div className="panel-title"><div><h3>Network pulse</h3><p>{pulseStatus}</p></div><button className={`feed-refresh ${reachabilityRefreshing ? "loading" : ""}`} onClick={() => void onRefreshReachability()} disabled={reachabilityRefreshing} aria-label="Refresh network reachability" title="Refresh network reachability"><RefreshCw size={15} /></button></div><div className="metrics"><Metric icon={Gauge} value={hosts.length ? `${((reachableCount / hosts.length) * 100).toFixed(1)}%` : "—"} label="Availability" trend={reachabilityRefreshing ? "Checking…" : attentionCount ? `${attentionCount} alert${attentionCount === 1 ? "" : "s"}` : "All reachable"} warning={attentionCount > 0} /><Metric icon={Activity} value={averageLatency} label="Avg latency" trend={reachabilityLastChecked ? "Latest check" : "No check yet"} /><Metric icon={Server} value={`${reachableCount} / ${hosts.length}`} label="Reachable" trend={reachabilityRefreshing ? "Updating" : "Live status"} warning={attentionCount > 0} /></div></section>
         <section className="panel command-panel"><div className="panel-title"><div><h3>Recent commands</h3><p>Run again in one click</p></div><button><MoreHorizontal size={17} /></button></div>{recentCommands.slice(0, 3).map((command) => <div className="command-row" key={command}><code>{command}</code><button><Copy size={14} /></button></div>)}</section>
       </div>
     </div>
@@ -1214,6 +1266,12 @@ function InteractiveTerminal({ session, onData, onReconnect, autocompleteEnabled
         suggestionsRef.current = [];
         suggestionRef.current = null;
         setSuggestions([]);
+        return false;
+      }
+      if ((event.metaKey || event.ctrlKey) && key === "v") {
+        event.preventDefault();
+        event.stopPropagation();
+        void pasteClipboard();
         return false;
       }
       if ((event.metaKey || event.ctrlKey) && key === "c" && terminal.hasSelection()) {
