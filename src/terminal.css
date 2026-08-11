@@ -317,20 +317,23 @@
 .terminal-login .terminal-login-save span { display: inline; margin: 0; }
 .terminal-login form > .primary-button { width: 100%; height: 38px; margin-top: 17px; }
 
-.terminal-shell { min-height:0;overflow:hidden;background:#070b10; }
+.terminal-shell { min-height:0;flex:1 1 auto;display:flex;flex-direction:column;overflow:hidden;background:#070b10;box-sizing:border-box; }
+.terminal-shell > .xterm-host { flex:1 1 0; min-width:0; min-height:0; box-sizing:border-box; }
 .terminal-shell > .terminal-status {
+  flex: 0 0 auto;
   min-height: 42px;
   height: auto;
   padding: 6px 12px;
   gap: 8px 14px;
   flex-wrap: wrap;
   overflow: visible;
+  box-sizing: border-box;
 }
 .terminal-shell > .terminal-session-info { order: 0; }
 .terminal-shell > .terminal-autocomplete { order: 1; }
 .terminal-shell > .xterm-host { order: 2; }
 .terminal-shell > .terminal-status { order: 3; }
-.terminal-autocomplete { position: relative; width: auto; height: 40px; flex: none; margin: 0; padding: 5px 12px; overflow-x: auto; overflow-y: hidden; border: 0; border-top: 1px solid #17232c; background: #090f14; box-shadow: none; display:flex; align-items:center; gap:5px; scrollbar-width:none; }
+.terminal-autocomplete { position: relative; width: auto; height: 40px; flex: 0 0 auto; margin: 0; padding: 5px 12px; overflow-x: auto; overflow-y: hidden; border: 0; border-top: 1px solid #17232c; background: #090f14; box-shadow: none; display:flex; align-items:center; gap:5px; scrollbar-width:none; box-sizing:border-box; }
 .terminal-autocomplete::-webkit-scrollbar { display:none; }
 .terminal-autocomplete-heading { min-width: 124px; height: 30px; flex:none; padding: 0 9px 0 2px; border: 0; display: flex; align-items: center; gap: 8px; }
 .terminal-autocomplete-heading > span { color: #a8b7c2; display: flex; align-items: center; gap: 6px; font: 600 9px "Inter", sans-serif; }
