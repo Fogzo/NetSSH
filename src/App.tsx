@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getVersion } from "@tauri-apps/api/app";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -207,6 +207,7 @@ function App() {
   const [notifications, setNotifications] = useState<AppNotification[]>([
     { id: "phase-3", message: "Phase 3 workspace tools are ready: tabs, split panes, and AI side panel.", createdAt: Date.now(), read: false },
   ]);
+  const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
   const [history, setHistory] = useState<ConnectionHistory[]>(() => {
     try {
       const saved = localStorage.getItem("netssh.history");
@@ -215,6 +216,31 @@ function App() {
       return [];
     }
   });
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let disposed = false;
+    const checkOnLaunch = async () => {
+      try {
+        const update = await check();
+        if (disposed) return;
+        setAvailableUpdate(update);
+        if (update) {
+          const noticeId = `update-${update.version}`;
+          setNotifications((current) => current.some((item) => item.id === noticeId)
+            ? current
+            : [{ id: noticeId, message: `NetSSH update ${update.version} is available. Open Settings to review it.`, createdAt: Date.now(), read: false }, ...current]);
+        }
+      } catch {
+        // Update checks are best effort and should never delay the workspace.
+      }
+    };
+    const timer = window.setTimeout(() => { void checkOnLaunch(); }, 500);
+    return () => {
+      disposed = true;
+      window.clearTimeout(timer);
+    };
+  }, []);
 
   useEffect(() => {
     localStorage.setItem("netssh.devices", JSON.stringify(deviceHosts));
@@ -572,7 +598,7 @@ function App() {
 
   return (
     <div className={`app-shell ${lightMode ? "theme-light" : "theme-dark"} ${preferences.compactWorkspace ? "compact-workspace" : ""}`}>
-      <Sidebar view={view} setView={setView} open={sidebarOpen} setOpen={setSidebarOpen} onSearch={() => setSearchOpen(true)} onOpenSettings={() => setSettingsOpen(true)} onEditProfile={() => setProfileEditorOpen(true)} onShowOnboarding={() => setOnboardingOpen(true)} userProfile={userProfile} notify={notify} deviceCount={deviceHosts.length} />
+      <Sidebar view={view} setView={setView} open={sidebarOpen} setOpen={setSidebarOpen} onSearch={() => setSearchOpen(true)} onOpenSettings={() => setSettingsOpen(true)} onEditProfile={() => setProfileEditorOpen(true)} onShowOnboarding={() => setOnboardingOpen(true)} userProfile={userProfile} notify={notify} deviceCount={deviceHosts.length} updateAvailable={availableUpdate} />
       <main className={`main ${sidebarOpen ? "" : "main-expanded"}`}>
         <Topbar view={view} onSearch={() => setSearchOpen(true)} notifications={notifications} notificationsOpen={notificationsOpen} onToggleNotifications={() => { setNotificationsOpen((open) => !open); setSettingsOpen(false); setNotifications((current) => current.map((item) => ({ ...item, read: true }))); }} onClearNotifications={() => setNotifications([])} onOpenSettings={() => { setSettingsOpen(true); setNotificationsOpen(false); }} />
         <div className="content">
@@ -612,7 +638,7 @@ function App() {
         setDeviceHosts((current) => editingHost ? current.map((item) => item.id === host.id ? host : item) : [host, ...current]);
         setAddDeviceOpen(false); setEditingHost(null); setView("inventory");
       }} />}
-      {settingsOpen && <SettingsModal preferences={preferences} onClose={() => setSettingsOpen(false)} onSave={(next) => { setPreferences(next); setSettingsOpen(false); notify("Settings saved"); }} />}
+      {settingsOpen && <SettingsModal preferences={preferences} availableUpdate={availableUpdate} onUpdateFound={setAvailableUpdate} onClose={() => setSettingsOpen(false)} onSave={(next) => { setPreferences(next); setSettingsOpen(false); notify("Settings saved"); }} />}
       {deviceDiscoveryOpen && <DeviceDiscoveryModal credentialProfiles={credentialProfiles} configuredSites={preferences.sites} existingHosts={deviceHosts} onClose={() => setDeviceDiscoveryOpen(false)} onImport={importDiscoveredHosts} />}
       {onboardingOpen && <UserProfileModal profile={userProfile} onboarding onClose={() => setOnboardingOpen(false)} onSave={(profile) => { setUserProfile(profile); setOnboardingOpen(false); notify(`Welcome to NetSSH, ${profile.name.split(" ")[0]}`); }} />}
       {profileEditorOpen && <UserProfileModal profile={userProfile} onClose={() => setProfileEditorOpen(false)} onReset={() => { setUserProfile(defaultUserProfile); setProfileEditorOpen(false); setOnboardingOpen(true); }} onSave={(profile) => { setUserProfile(profile); setProfileEditorOpen(false); notify("Profile updated"); }} />}
@@ -622,7 +648,7 @@ function App() {
   );
 }
 
-function Sidebar({ view, setView, open, setOpen, onSearch, onOpenSettings, onEditProfile, onShowOnboarding, userProfile, notify, deviceCount }: { view: View; setView: (view: View) => void; open: boolean; setOpen: (open: boolean) => void; onSearch: () => void; onOpenSettings: () => void; onEditProfile: () => void; onShowOnboarding: () => void; userProfile: UserProfile; notify: (message: string) => void; deviceCount: number }) {
+function Sidebar({ view, setView, open, setOpen, onSearch, onOpenSettings, onEditProfile, onShowOnboarding, userProfile, notify, deviceCount, updateAvailable }: { view: View; setView: (view: View) => void; open: boolean; setOpen: (open: boolean) => void; onSearch: () => void; onOpenSettings: () => void; onEditProfile: () => void; onShowOnboarding: () => void; userProfile: UserProfile; notify: (message: string) => void; deviceCount: number; updateAvailable: Update | null }) {
   const [profileOpen, setProfileOpen] = useState(false);
   return (
     <aside className={`sidebar ${open ? "" : "sidebar-closed"}`}>
@@ -639,6 +665,7 @@ function Sidebar({ view, setView, open, setOpen, onSearch, onOpenSettings, onEdi
         <button className={`nav-item ${view === "credentials" ? "active" : ""}`} onClick={() => setView("credentials")}><KeyRound size={18} /><span>Credentials</span></button>
       </div>
       <div className="sidebar-footer">
+        {updateAvailable && <button className="sidebar-update-alert" aria-label={`Update available: NetSSH ${updateAvailable.version}`} title={`NetSSH ${updateAvailable.version} update available`} onClick={onOpenSettings}><ArrowDownCircle size={16} /><span><strong>Update available</strong><small>NetSSH {updateAvailable.version} · Open Settings</small></span></button>}
         <div className="sync-card"><div className="sync-icon"><ShieldCheck size={17} /></div><div><strong>Local vault</strong><small>Encrypted & secure</small></div><span className="status-dot" /></div>
         <div className="profile-wrap">{profileOpen && <div className="profile-menu"><button onClick={() => { setProfileOpen(false); onEditProfile(); }}><UserRound size={14} /><span><strong>Your profile</strong><small>Name and role</small></span></button><button onClick={() => { setProfileOpen(false); onOpenSettings(); }}><Settings size={14} /><span><strong>Preferences</strong><small>Workspace, sites, and platforms</small></span></button><button onClick={() => { setProfileOpen(false); setView("credentials"); }}><KeyRound size={14} /><span><strong>Credential vault</strong><small>Manage reusable logins</small></span></button><button onClick={() => { setProfileOpen(false); onShowOnboarding(); }}><Sparkles size={14} /><span><strong>Welcome tour</strong><small>Review the NetSSH basics</small></span></button><button onClick={() => { setProfileOpen(false); notify(`NetSSH ${APP_VERSION} · Local workspace`); }}><Network size={14} /><span><strong>About NetSSH</strong><small>Version {APP_VERSION}</small></span></button></div>}<button className="profile" aria-label="Open profile menu" onClick={() => setProfileOpen((value) => !value)}><span className="avatar">{profileInitials(userProfile.name)}</span><span><strong>{userProfile.name || "Network Engineer"}</strong><small>{userProfile.role || "Local workspace"}</small></span><MoreHorizontal size={18} /></button></div>
       </div>
@@ -685,12 +712,17 @@ function UserProfileModal({ profile, onboarding = false, onClose, onReset, onSav
 
 type AppUpdateStatus = "idle" | "checking" | "current" | "available" | "updating" | "unsupported" | "error";
 
-function AppUpdateSection() {
+function AppUpdateSection({ initialUpdate = null, onUpdateFound }: { initialUpdate?: Update | null; onUpdateFound?: (update: Update | null) => void }) {
   const [version, setVersion] = useState("Loading…");
   const [status, setStatus] = useState<AppUpdateStatus>("idle");
-  const [availableUpdate, setAvailableUpdate] = useState<Update | null>(null);
+  const [availableUpdate, setAvailableUpdate] = useState<Update | null>(initialUpdate);
   const [error, setError] = useState("");
   const [progress, setProgress] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (initialUpdate) setStatus("available");
+    setAvailableUpdate(initialUpdate ?? null);
+  }, [initialUpdate]);
 
   useEffect(() => {
     if (!isTauri()) {
@@ -711,9 +743,11 @@ function AppUpdateSection() {
     try {
       const update = await check();
       setAvailableUpdate(update);
+      onUpdateFound?.(update);
       setStatus(update ? "available" : "current");
     } catch (caught) {
       setAvailableUpdate(null);
+      onUpdateFound?.(null);
       setError(String(caught));
       setStatus("error");
     }
@@ -763,9 +797,9 @@ function AppUpdateSection() {
   return <section className="update-section"><div className="update-section-head"><div><strong>Application updates</strong><small>Signed releases are downloaded from GitHub</small></div><span className="update-version">v{version}</span></div><div className={`update-status ${status}`}>{statusContent}</div>{availableUpdate?.body && <p className="update-notes">{availableUpdate.body}</p>}{progress != null && status === "updating" && <div className="update-progress"><i style={{ width: `${progress}%` }} /></div>}<div className="update-actions"><button className="secondary-button" onClick={() => void checkForUpdates()} disabled={status === "checking" || status === "updating"}><RefreshCw size={14} className={status === "checking" ? "spin" : ""} /> Check for updates</button>{availableUpdate && <button className="primary-button" onClick={() => void installUpdate()} disabled={status === "updating"}><ArrowDownCircle size={14} /> Update now</button>}</div></section>;
 }
 
-function SettingsModal({ preferences, onClose, onSave }: { preferences: AppPreferences; onClose: () => void; onSave: (preferences: AppPreferences) => void }) {
+function SettingsModal({ preferences, availableUpdate, onUpdateFound, onClose, onSave }: { preferences: AppPreferences; availableUpdate: Update | null; onUpdateFound: (update: Update | null) => void; onClose: () => void; onSave: (preferences: AppPreferences) => void }) {
   const [draft, setDraft] = useState(preferences);
-  return <div className="modal-backdrop settings-backdrop" onMouseDown={onClose}><section className="settings-modal" onMouseDown={(event) => event.stopPropagation()}><div className="provider-modal-head"><div><span><Settings size={18} /></span><div><h3>NetSSH settings</h3><p>Workspace preferences are stored locally on this device.</p></div></div><button onClick={onClose}><X size={17} /></button></div><div className="settings-body"><AppUpdateSection /><label className="settings-select"><span><strong>Appearance</strong><small>Choose a light, dark, or operating-system theme</small></span><select value={draft.appearance} onChange={(event) => setDraft({ ...draft, appearance: event.target.value as Appearance })}><option value="dark">Dark</option><option value="light">Light</option><option value="system">Use system setting</option></select></label><label className="settings-select"><span><strong>Default connection protocol</strong><small>Used when creating a new device profile</small></span><select value={draft.defaultProtocol} onChange={(event) => setDraft({ ...draft, defaultProtocol: event.target.value as ConnectionProtocol })}><option value="ssh">SSH</option><option value="telnet">Telnet</option><option value="serial">Serial</option></select></label><label className="settings-toggle"><span><strong>Compact workspace</strong><small>Reduce tab, toolbar, and terminal spacing</small></span><input type="checkbox" checked={draft.compactWorkspace} onChange={(event) => setDraft({ ...draft, compactWorkspace: event.target.checked })} /></label><label className="settings-toggle"><span><strong>CLI autocomplete</strong><small>Suggest common network commands while typing in terminals</small></span><input type="checkbox" checked={draft.cliAutocomplete} onChange={(event) => setDraft({ ...draft, cliAutocomplete: event.target.checked })} /></label><label className="settings-toggle"><span><strong>Connection safety notices</strong><small>Show authentication and trust limitations in new sessions</small></span><input type="checkbox" checked={draft.showConnectionWarnings} onChange={(event) => setDraft({ ...draft, showConnectionWarnings: event.target.checked })} /></label><ConfigList title="Inventory sites" description="Available when adding or editing a device" items={draft.sites} placeholder="Add a site" onChange={(sites) => setDraft({ ...draft, sites })} /><ConfigList title="Device platforms" description="Vendor and operating-system choices" items={draft.platforms} placeholder="Add a platform" onChange={(platforms) => setDraft({ ...draft, platforms })} /><div className="settings-security"><ShieldCheck size={16} /><span>Credentials remain in the operating system vault. NetSSH does not store passwords in preferences.</span></div></div><div className="modal-actions settings-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" onClick={() => onSave(draft)}>Save settings</button></div></section></div>;
+  return <div className="modal-backdrop settings-backdrop" onMouseDown={onClose}><section className="settings-modal" onMouseDown={(event) => event.stopPropagation()}><div className="provider-modal-head"><div><span><Settings size={18} /></span><div><h3>NetSSH settings</h3><p>Workspace preferences are stored locally on this device.</p></div></div><button onClick={onClose}><X size={17} /></button></div><div className="settings-body"><AppUpdateSection initialUpdate={availableUpdate} onUpdateFound={onUpdateFound} /><label className="settings-select"><span><strong>Appearance</strong><small>Choose a light, dark, or operating-system theme</small></span><select value={draft.appearance} onChange={(event) => setDraft({ ...draft, appearance: event.target.value as Appearance })}><option value="dark">Dark</option><option value="light">Light</option><option value="system">Use system setting</option></select></label><label className="settings-select"><span><strong>Default connection protocol</strong><small>Used when creating a new device profile</small></span><select value={draft.defaultProtocol} onChange={(event) => setDraft({ ...draft, defaultProtocol: event.target.value as ConnectionProtocol })}><option value="ssh">SSH</option><option value="telnet">Telnet</option><option value="serial">Serial</option></select></label><label className="settings-toggle"><span><strong>Compact workspace</strong><small>Reduce tab, toolbar, and terminal spacing</small></span><input type="checkbox" checked={draft.compactWorkspace} onChange={(event) => setDraft({ ...draft, compactWorkspace: event.target.checked })} /></label><label className="settings-toggle"><span><strong>CLI autocomplete</strong><small>Suggest common network commands while typing in terminals</small></span><input type="checkbox" checked={draft.cliAutocomplete} onChange={(event) => setDraft({ ...draft, cliAutocomplete: event.target.checked })} /></label><label className="settings-toggle"><span><strong>Connection safety notices</strong><small>Show authentication and trust limitations in new sessions</small></span><input type="checkbox" checked={draft.showConnectionWarnings} onChange={(event) => setDraft({ ...draft, showConnectionWarnings: event.target.checked })} /></label><ConfigList title="Inventory sites" description="Available when adding or editing a device" items={draft.sites} placeholder="Add a site" onChange={(sites) => setDraft({ ...draft, sites })} /><ConfigList title="Device platforms" description="Vendor and operating-system choices" items={draft.platforms} placeholder="Add a platform" onChange={(platforms) => setDraft({ ...draft, platforms })} /><div className="settings-security"><ShieldCheck size={16} /><span>Credentials remain in the operating system vault. NetSSH does not store passwords in preferences.</span></div></div><div className="modal-actions settings-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" onClick={() => onSave(draft)}>Save settings</button></div></section></div>;
 }
 
 function ConfigList({ title, description, items, placeholder, onChange }: { title: string; description: string; items: string[]; placeholder: string; onChange: (items: string[]) => void }) {
@@ -1008,6 +1042,7 @@ function InteractiveTerminal({ session, onData, onReconnect, autocompleteEnabled
   const onReconnectRef = useRef(onReconnect);
   const connectedRef = useRef(session.connected);
   const connectionStateRef = useRef(session.connectionState);
+  const autoFocusRef = useRef(autoFocus);
   const renderedLines = useRef(0);
   const inputBuffer = useRef("");
   const suggestionRef = useRef<CiscoCommandSuggestion | null>(null);
@@ -1019,6 +1054,17 @@ function InteractiveTerminal({ session, onData, onReconnect, autocompleteEnabled
   onReconnectRef.current = onReconnect;
   connectedRef.current = session.connected || session.connectionState === "connecting";
   connectionStateRef.current = session.connectionState;
+  autoFocusRef.current = autoFocus;
+
+  const focusTerminal = useCallback(() => {
+    if (!autoFocusRef.current || document.hidden) return;
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    terminal.focus();
+    requestAnimationFrame(() => {
+      if (!document.hidden && terminalRef.current === terminal) terminal.focus();
+    });
+  }, []);
 
   const updateSuggestions = (value: string) => {
     const matches = autocompleteEnabled ? findCiscoCommandSuggestions(value) : [];
@@ -1115,6 +1161,7 @@ function InteractiveTerminal({ session, onData, onReconnect, autocompleteEnabled
     terminal.loadAddon(fitAddon);
     terminal.open(hostRef.current);
     terminalRef.current = terminal;
+    if (autoFocus) terminal.focus();
     session.lines.forEach((line) => writeLine(terminal, line));
     renderedLines.current = session.lines.length;
     const fit = () => {
@@ -1173,17 +1220,13 @@ function InteractiveTerminal({ session, onData, onReconnect, autocompleteEnabled
         void copySelection();
         return false;
       }
-      if ((event.metaKey || event.ctrlKey) && key === "v") {
-        void pasteClipboard();
-        return false;
-      }
       if ((event.metaKey || (event.ctrlKey && event.shiftKey)) && key === "a") {
         selectAll();
         return false;
       }
       return true;
     });
-    requestAnimationFrame(() => { fit(); if (autoFocus) terminal.focus(); });
+    requestAnimationFrame(() => { fit(); focusTerminal(); });
     return () => {
       dataSubscription.dispose();
       selectionSubscription.dispose();
@@ -1192,7 +1235,7 @@ function InteractiveTerminal({ session, onData, onReconnect, autocompleteEnabled
       terminalRef.current = null;
       renderedLines.current = 0;
     };
-  }, [session.id, autocompleteEnabled]);
+  }, [session.id, autocompleteEnabled, focusTerminal]);
 
   useEffect(() => {
     const terminal = terminalRef.current;
@@ -1203,8 +1246,22 @@ function InteractiveTerminal({ session, onData, onReconnect, autocompleteEnabled
   }, [session.lines]);
 
   useEffect(() => {
-    if (autoFocus) terminalRef.current?.focus();
-  }, [autoFocus]);
+    focusTerminal();
+  }, [autoFocus, focusTerminal]);
+
+  useEffect(() => {
+    const restoreFocus = () => {
+      const activeElement = document.activeElement as HTMLElement | null;
+      if (activeElement && activeElement !== document.body && !activeElement.classList.contains("xterm-helper-textarea")) return;
+      focusTerminal();
+    };
+    window.addEventListener("focus", restoreFocus);
+    document.addEventListener("visibilitychange", restoreFocus);
+    return () => {
+      window.removeEventListener("focus", restoreFocus);
+      document.removeEventListener("visibilitychange", restoreFocus);
+    };
+  }, [focusTerminal]);
 
   useEffect(() => {
     autocompleteRef.current?.querySelector("button.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
@@ -1235,7 +1292,7 @@ function InteractiveTerminal({ session, onData, onReconnect, autocompleteEnabled
 
   const stateLabel = session.connectionState === "connecting" ? "Connecting" : session.connected ? "Connected" : session.connectionState === "error" ? "Error" : "Closed";
   const canReconnect = !session.connected && ["closed", "error"].includes(session.connectionState ?? "");
-  return <div className="terminal terminal-shell"><div className="xterm-host" ref={hostRef} aria-label={`${session.host.name} interactive terminal`} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY }); }} />{contextMenu && <div ref={contextMenuRef} className="terminal-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} role="menu" onContextMenu={(event) => event.preventDefault()}><button type="button" disabled={!terminalRef.current?.hasSelection()} onClick={() => void copySelection()}><Copy size={14} /><span>Copy selection</span><kbd>Ctrl+C</kbd></button><button type="button" disabled={!session.connected} onClick={() => void pasteClipboard()}><ClipboardPaste size={14} /><span>Paste</span><kbd>Ctrl+V</kbd></button><div /><button type="button" onClick={selectAll}><Check size={14} /><span>Select all</span><kbd>Ctrl+Shift+A</kbd></button><button type="button" onClick={() => { terminalRef.current?.clearSelection(); terminalRef.current?.focus(); setContextMenu(null); }}><X size={14} /><span>Clear selection</span></button></div>}<div ref={autocompleteRef} className={`terminal-autocomplete ${suggestions.length ? "has-suggestions" : "idle"}`}><div className="terminal-autocomplete-heading"><span><Sparkles size={11} /> Command assist</span><small><kbd>←→</kbd> navigate <kbd>Tab</kbd> accept <kbd>Esc</kbd> close</small></div>{suggestions.length ? suggestions.map((suggestion, index) => <button key={suggestion.command} title={suggestion.description} aria-label={`${suggestion.command}. ${suggestion.description}`} className={index === suggestionIndex ? `active ${suggestion.kind}` : suggestion.kind} onMouseEnter={() => { suggestionRef.current = suggestion; setSuggestionIndex(index); }} onMouseDown={(event) => event.preventDefault()} onClick={() => acceptSuggestion(suggestion)}><Command size={11} /><code>{suggestion.command}</code><em>{suggestion.kind === "show" ? "Read only" : suggestion.kind === "action" ? "Review" : "Configure"}</em></button>) : <span className="terminal-autocomplete-idle">Type a Cisco command or abbreviation · ← → select · Tab accept</span>}</div><div className={`terminal-status ${session.connected ? "connected" : "disconnected"}`}><span><i /> {(session.host.protocol ?? "ssh").toUpperCase()} · {stateLabel}</span>{canReconnect && <span className="terminal-reconnect-hint">Press R or use Reconnect</span>}<span>{autocompleteEnabled ? "Autocomplete on" : "Autocomplete off"}</span><span>xterm-256color</span><span>UTF-8</span><div className="terminal-actions">{canReconnect && <button className="terminal-reconnect-button" type="button" onClick={() => void onReconnect()} title="Reconnect session (R)"><RefreshCw size={11} /> Reconnect</button>}<button type="button" onClick={() => void copySelection()} title="Copy selection (Ctrl+C / Cmd+C)"><Copy size={11} /> Copy</button><button type="button" onClick={() => void pasteClipboard()} title="Paste (Ctrl+V / Cmd+V)"><ClipboardPaste size={11} /> Paste</button><button type="button" onClick={() => { terminalRef.current?.clear(); terminalRef.current?.focus(); }} title="Clear local scrollback"><Trash2 size={11} /> Clear</button></div></div></div>;
+  return <div className="terminal terminal-shell"><div className="xterm-host" ref={hostRef} aria-label={`${session.host.name} interactive terminal`} onMouseDown={focusTerminal} onContextMenu={(event) => { event.preventDefault(); setContextMenu({ x: event.clientX, y: event.clientY }); }} />{contextMenu && <div ref={contextMenuRef} className="terminal-context-menu" style={{ left: contextMenu.x, top: contextMenu.y }} role="menu" onContextMenu={(event) => event.preventDefault()}><button type="button" disabled={!terminalRef.current?.hasSelection()} onClick={() => void copySelection()}><Copy size={14} /><span>Copy selection</span><kbd>Ctrl+C</kbd></button><button type="button" disabled={!session.connected} onClick={() => void pasteClipboard()}><ClipboardPaste size={14} /><span>Paste</span><kbd>Ctrl+V</kbd></button><div /><button type="button" onClick={selectAll}><Check size={14} /><span>Select all</span><kbd>Ctrl+Shift+A</kbd></button><button type="button" onClick={() => { terminalRef.current?.clearSelection(); terminalRef.current?.focus(); setContextMenu(null); }}><X size={14} /><span>Clear selection</span></button></div>}<div ref={autocompleteRef} className={`terminal-autocomplete ${suggestions.length ? "has-suggestions" : "idle"}`}><div className="terminal-autocomplete-heading"><span><Sparkles size={11} /> Command assist</span><small><kbd>←→</kbd> navigate <kbd>Tab</kbd> accept <kbd>Esc</kbd> close</small></div>{suggestions.length ? suggestions.map((suggestion, index) => <button key={suggestion.command} title={suggestion.description} aria-label={`${suggestion.command}. ${suggestion.description}`} className={index === suggestionIndex ? `active ${suggestion.kind}` : suggestion.kind} onMouseEnter={() => { suggestionRef.current = suggestion; setSuggestionIndex(index); }} onMouseDown={(event) => event.preventDefault()} onClick={() => acceptSuggestion(suggestion)}><Command size={11} /><code>{suggestion.command}</code><em>{suggestion.kind === "show" ? "Read only" : suggestion.kind === "action" ? "Review" : "Configure"}</em></button>) : <span className="terminal-autocomplete-idle">Type a Cisco command or abbreviation · ← → select · Tab accept</span>}</div><div className={`terminal-status ${session.connected ? "connected" : "disconnected"}`}><span><i /> {(session.host.protocol ?? "ssh").toUpperCase()} · {stateLabel}</span>{canReconnect && <span className="terminal-reconnect-hint">Press R or use Reconnect</span>}<span>{autocompleteEnabled ? "Autocomplete on" : "Autocomplete off"}</span><span>xterm-256color</span><span>UTF-8</span><div className="terminal-actions">{canReconnect && <button className="terminal-reconnect-button" type="button" onClick={() => void onReconnect()} title="Reconnect session (R)"><RefreshCw size={11} /> Reconnect</button>}<button type="button" onClick={() => void copySelection()} title="Copy selection (Ctrl+C / Cmd+C)"><Copy size={11} /> Copy</button><button type="button" onClick={() => void pasteClipboard()} title="Paste (Ctrl+V / Cmd+V)"><ClipboardPaste size={11} /> Paste</button><button type="button" onClick={() => { terminalRef.current?.clear(); terminalRef.current?.focus(); }} title="Clear local scrollback"><Trash2 size={11} /> Clear</button></div></div></div>;
 }
 
 function Inventory({ hosts, onConnect, onAdd, onTransfer, onEdit, onFavorite, onDelete }: { hosts: Host[]; onConnect: (host: Host) => void; onAdd: () => void; onTransfer: () => void; onEdit: (host: Host) => void; onFavorite: (id: string) => void; onDelete: (id: string) => void }) {
