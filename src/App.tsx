@@ -1214,16 +1214,33 @@ function InteractiveTerminal({ session, onData, onReconnect, autocompleteEnabled
     terminal.open(hostRef.current);
     terminalRef.current = terminal;
     if (autoFocus) terminal.focus();
-    session.lines.forEach((line) => writeLine(terminal, line));
-    renderedLines.current = session.lines.length;
     const fit = () => {
       try {
+        const host = hostRef.current;
+        if (!host || host.clientWidth === 0 || host.clientHeight === 0) return;
         fitAddon.fit();
+        terminal.refresh(0, Math.max(0, terminal.rows - 1));
         void resizeTerminal(session.id, terminal.cols, terminal.rows);
       } catch {}
     };
+    const fitTimers: number[] = [];
+    const scheduleFit = () => {
+      requestAnimationFrame(() => { fit(); focusTerminal(); });
+      [50, 150, 300].forEach((delay) => {
+        fitTimers.push(window.setTimeout(() => { fit(); focusTerminal(); }, delay));
+      });
+    };
+    session.lines.forEach((line) => writeLine(terminal, line));
+    renderedLines.current = session.lines.length;
+    terminal.write("", () => {
+      terminal.scrollToBottom();
+      scheduleFit();
+    });
     const resizeObserver = new ResizeObserver(fit);
     resizeObserver.observe(hostRef.current);
+    const restoreTerminal = () => scheduleFit();
+    window.addEventListener("focus", restoreTerminal);
+    document.addEventListener("visibilitychange", restoreTerminal);
     const dataSubscription = terminal.onData((data) => {
       if (connectedRef.current) {
         terminal.scrollToBottom();
@@ -1284,11 +1301,14 @@ function InteractiveTerminal({ session, onData, onReconnect, autocompleteEnabled
       }
       return true;
     });
-    requestAnimationFrame(() => { fit(); focusTerminal(); });
+    scheduleFit();
     return () => {
       dataSubscription.dispose();
       selectionSubscription.dispose();
       resizeObserver.disconnect();
+      window.removeEventListener("focus", restoreTerminal);
+      document.removeEventListener("visibilitychange", restoreTerminal);
+      fitTimers.forEach((timer) => window.clearTimeout(timer));
       terminal.dispose();
       terminalRef.current = null;
       renderedLines.current = 0;
