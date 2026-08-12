@@ -132,9 +132,10 @@ fn complete_startup(app: tauri::AppHandle) -> Result<(), String> {
         .get_webview_window("main")
         .ok_or_else(|| "The main NetSSH window is unavailable".to_string())?;
     main.show().map_err(|error| error.to_string())?;
-    main.set_focus().map_err(|error| error.to_string())?;
+    let _ = main.set_focus();
     if let Some(splashscreen) = app.get_webview_window("splashscreen") {
-        splashscreen.close().map_err(|error| error.to_string())?;
+        let _ = splashscreen.hide();
+        let _ = splashscreen.close();
     }
     Ok(())
 }
@@ -564,6 +565,14 @@ pub fn run() {
 
     builder
         .manage(ssh::TerminalManager::default())
+        .setup(|app| {
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                std::thread::sleep(Duration::from_secs(10));
+                let _ = complete_startup(handle);
+            });
+            Ok(())
+        })
         .on_window_event(|window, event| {
             if window.label() == "main"
                 && matches!(event, tauri::WindowEvent::CloseRequested { .. })

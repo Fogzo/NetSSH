@@ -19,7 +19,7 @@ import { ciscoDemoHosts, hosts as initialHosts, recentCommands, snippets } from 
 import { calculateSubnet, type SubnetResult } from "./network";
 import { runDiagnostic, type DiagnosticKind, type DiagnosticResult } from "./diagnostics";
 import { openWifiPrivacySettings, runWifiDiagnostic, signalHealth, type WifiDiagnostic } from "./wifi";
-import { closeTerminal, listSerialPorts, listenForTerminalEvents, preflightConnection, probeSshHostKey, resizeTerminal, startTerminalSession, writeTerminal, writeTerminalEnablePassword, type SerialPortInfo } from "./ssh";
+import { closeTerminal, listSerialPorts, listenForTerminalEvents, preflightConnection, probeSshHostKey, resizeTerminal, startTerminalSession, writeTerminal, writeTerminalEnablePassword, type SerialPortInfo, type TerminalEvent } from "./ssh";
 import { deleteCredentialEnablePassword, deleteCredentialPassword, deleteDevicePassword, hasCredentialEnablePassword, hasCredentialPassword, hasDevicePassword, isNativeApp, saveCredentialEnablePassword, saveCredentialPassword } from "./credentials";
 import { readClipboardText, writeClipboardText } from "./clipboard";
 import { createSwitchAuditCsv, runLiveSwitchAudit, type LiveSwitchAudit } from "./switchAudit";
@@ -47,6 +47,7 @@ const navItems: { id: View; label: string; icon: typeof TerminalSquare }[] = [
 const statusLabel = { online: "Reachable", warning: "Attention", offline: "Offline" };
 type Appearance = "dark" | "light" | "system";
 type AppPreferences = { appearance: Appearance; compactWorkspace: boolean; showConnectionWarnings: boolean; cliAutocomplete: boolean; defaultProtocol: ConnectionProtocol; sites: string[]; platforms: string[] };
+const MAX_TERMINAL_LINES = 10_000;
 type UserProfile = { name: string; role: string; onboardingComplete: boolean };
 type AppNotification = { id: string; message: string; createdAt: number; read: boolean };
 type ConnectionCredentials = { username: string; password?: string; savePassword: boolean };
@@ -202,13 +203,24 @@ function App() {
   const [profileEditorOpen, setProfileEditorOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const ciscoDemoStates = useRef(new Map<string, CiscoDemoState>());
+  const terminalEventQueue = useRef(new Map<string, TerminalEvent[]>());
+  const terminalEventFrame = useRef<number | null>(null);
   const [preferences, setPreferences] = useState<AppPreferences>(() => {
     try { return { ...defaultPreferences, ...JSON.parse(localStorage.getItem("netssh.preferences") ?? "{}") }; }
     catch { return defaultPreferences; }
   });
   useEffect(() => {
     if (!isNativeApp()) return;
-    requestAnimationFrame(() => { void invoke("complete_startup").catch(() => undefined); });
+    let disposed = false;
+    const completeStartup = () => {
+      if (!disposed) void invoke("complete_startup").catch(() => undefined);
+    };
+    completeStartup();
+    const retryTimers = [100, 400, 1_000, 2_500].map((delay) => window.setTimeout(completeStartup, delay));
+    return () => {
+      disposed = true;
+      retryTimers.forEach((timer) => window.clearTimeout(timer));
+    };
   }, []);
   const [userProfile, setUserProfile] = useState<UserProfile>(() => {
     try { return { ...defaultUserProfile, ...JSON.parse(localStorage.getItem("netssh.userProfile") ?? "{}") }; }
@@ -322,21 +334,44 @@ function App() {
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | undefined;
-    listenForTerminalEvents((event) => {
-      const text = event.kind === "data" ? event.data : cleanTerminalOutput(event.data);
+    const flushEvents = () => {
+      terminalEventFrame.current = null;
+      const queued = terminalEventQueue.current;
+      terminalEventQueue.current = new Map();
+      if (!queued.size) return;
       setSessions((current) => current.map((session) => {
-        if (session.id !== event.sessionId) return session;
-        if (event.kind === "connected") return { ...session, connected: true, connectionState: "connected", lines: [...session.lines, { kind: "info", text }] };
-        if (event.kind === "closed") return { ...session, connected: false, connectionState: "closed", lines: [...session.lines, { kind: "warning", text }] };
-        if (event.kind === "error") return { ...session, connected: false, connectionState: "error", lines: [...session.lines, { kind: "warning", text }] };
-        if (!text) return session;
-        return { ...session, lines: [...session.lines, { kind: event.kind === "info" ? "info" : "output", text }] };
+        const events = queued.get(session.id);
+        if (!events?.length) return session;
+        let connected = session.connected;
+        let connectionState = session.connectionState;
+        const lines = [...session.lines];
+        for (const event of events) {
+          const text = event.kind === "data" ? event.data : cleanTerminalOutput(event.data);
+          if (event.kind === "connected") { connected = true; connectionState = "connected"; }
+          else if (event.kind === "closed") { connected = false; connectionState = "closed"; }
+          else if (event.kind === "error") { connected = false; connectionState = "error"; }
+          if (text) lines.push({ kind: event.kind === "info" || event.kind === "connected" ? "info" : event.kind === "error" || event.kind === "closed" ? "warning" : "output", text });
+        }
+        return { ...session, connected, connectionState, lines: lines.length > MAX_TERMINAL_LINES ? lines.slice(-MAX_TERMINAL_LINES) : lines };
       }));
-    }).then((stop) => {
+    };
+    const queueEvent = (event: TerminalEvent) => {
+      const events = terminalEventQueue.current.get(event.sessionId) ?? [];
+      events.push(event);
+      terminalEventQueue.current.set(event.sessionId, events);
+      if (terminalEventFrame.current == null) terminalEventFrame.current = requestAnimationFrame(flushEvents);
+    };
+    listenForTerminalEvents(queueEvent).then((stop) => {
       if (disposed) stop();
       else unlisten = stop;
     });
-    return () => { disposed = true; unlisten?.(); };
+    return () => {
+      disposed = true;
+      unlisten?.();
+      terminalEventQueue.current.clear();
+      if (terminalEventFrame.current != null) cancelAnimationFrame(terminalEventFrame.current);
+      terminalEventFrame.current = null;
+    };
   }, []);
 
   useEffect(() => {

@@ -1031,6 +1031,8 @@ fn run_serial_session(
         format!("Serial console connected to {target} at {baud_rate} baud"),
     );
     let mut buffer = [0_u8; 4096];
+    let mut pending_output = Vec::with_capacity(8192);
+    let mut last_output = Instant::now();
     'session: loop {
         loop {
             match receiver.try_recv() {
@@ -1054,14 +1056,47 @@ fn run_serial_session(
             }
         }
         match serial.read(&mut buffer) {
-            Ok(count) if count > 0 => emit_terminal(
-                &app,
-                &session_id,
-                "data",
-                String::from_utf8_lossy(&buffer[..count]).into_owned(),
-            ),
-            Ok(_) => {}
-            Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {}
+            Ok(count) if count > 0 => {
+                pending_output.extend_from_slice(&buffer[..count]);
+                if pending_output.len() >= 8192
+                    || last_output.elapsed() >= Duration::from_millis(25)
+                {
+                    emit_terminal(
+                        &app,
+                        &session_id,
+                        "data",
+                        String::from_utf8_lossy(&pending_output).into_owned(),
+                    );
+                    pending_output.clear();
+                    last_output = Instant::now();
+                }
+            }
+            Ok(_) => {
+                if !pending_output.is_empty() && last_output.elapsed() >= Duration::from_millis(25)
+                {
+                    emit_terminal(
+                        &app,
+                        &session_id,
+                        "data",
+                        String::from_utf8_lossy(&pending_output).into_owned(),
+                    );
+                    pending_output.clear();
+                    last_output = Instant::now();
+                }
+            }
+            Err(error) if matches!(error.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) => {
+                if !pending_output.is_empty() && last_output.elapsed() >= Duration::from_millis(25)
+                {
+                    emit_terminal(
+                        &app,
+                        &session_id,
+                        "data",
+                        String::from_utf8_lossy(&pending_output).into_owned(),
+                    );
+                    pending_output.clear();
+                    last_output = Instant::now();
+                }
+            }
             Err(error) => {
                 emit_terminal(
                     &app,
@@ -1072,6 +1107,14 @@ fn run_serial_session(
                 break;
             }
         }
+    }
+    if !pending_output.is_empty() {
+        emit_terminal(
+            &app,
+            &session_id,
+            "data",
+            String::from_utf8_lossy(&pending_output).into_owned(),
+        );
     }
     tauri::async_runtime::block_on(async { sessions.lock().await.remove(&session_id) });
     emit_terminal(&app, &session_id, "closed", "Serial console closed");
