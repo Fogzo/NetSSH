@@ -30,7 +30,7 @@
   min-height: 0;
   border-style: solid;
   border-color: #070b10;
-  border-width: 10px 12px;
+  border-width: 10px 12px 16px;
   overflow: hidden;
   background: #070b10;
 }
@@ -183,7 +183,7 @@
 }
 
 .session-pane .xterm-host {
-  border-width: 8px 10px;
+  border-width: 8px 10px 14px;
 }
 
 .terminal-actions {
@@ -370,14 +370,14 @@
 @media(max-height:700px) {
   .terminal-session-info { min-height: 29px; padding-block: 3px; }
   .terminal-info-badge { height: 20px; }
-  .xterm-host { border-width: 7px 10px; }
+  .xterm-host { border-width: 7px 10px 12px; }
   .terminal-autocomplete { height:36px; padding-block:3px; }
 }
 
 @media(max-height:520px) {
   .terminal-session-info { display: none; }
   .terminal-status { height: 22px; }
-  .xterm-host { border-width: 5px 8px; }
+  .xterm-host { border-width: 5px 8px 10px; }
   .terminal-autocomplete { height:32px; padding-inline:9px; }
   .terminal-autocomplete-heading,.terminal-autocomplete button { height:26px; }
   .terminal-autocomplete em { display:none; }
