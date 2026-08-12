@@ -60,5 +60,35 @@ jobs:
           releaseDraft: false
           prerelease: false
           generateReleaseNotes: true
-          includeUpdaterJson: true
+          # The macOS and Windows jobs run in parallel. Publish latest.json in
+          # the single follow-up job below so neither job can overwrite the
+          # other's platform entries.
+          includeUpdaterJson: false
           args: ${{ matrix.args }}
+
+  publish-updater-manifest:
+    name: Publish updater manifest
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build updater manifest
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: node scripts/create-updater-manifest.mjs
+
+      - name: Upload updater manifest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version=$(node -e "console.log(JSON.parse(require('fs').readFileSync('package.json', 'utf8')).version)")
+          gh release upload "v${version}" latest.json --clobber --repo "${GITHUB_REPOSITORY}"
