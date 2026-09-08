@@ -11,6 +11,9 @@ import "./readability.css";
 import "./switch-audit.css";
 import "./engineer-notes.css";
 import "./device-discovery.css";
+import "./inventory.css";
+import "./settings.css";
+import "./credentials.css";
 import "@xterm/xterm/css/xterm.css";
 import { createId } from "./id";
 

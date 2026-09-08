@@ -1,0 +1,14 @@
+.status-pill.serial {
+  color: #d2a8ff;
+  background: rgba(91, 60, 124, .17);
+}
+
+.status-pill.serial i,
+.device-state.serial {
+  background: #d2a8ff;
+}
+
+.theme-light .status-pill.serial {
+  color: #7650a2;
+  background: #f1eafa;
+}
