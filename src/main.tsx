@@ -8,6 +8,7 @@ import "./themes.css";
 import "./terminal.css";
 import "./topology.css";
 import "./readability.css";
+import "./switch-audit.css";
 import "./engineer-notes.css";
 import "./device-discovery.css";
 import "@xterm/xterm/css/xterm.css";

@@ -1,4 +1,4 @@
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { isTauri } from "@tauri-apps/api/core";
 import { open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
 import { readTextFile, writeTextFile } from "@tauri-apps/plugin-fs";
@@ -85,6 +85,61 @@ function newDocument(name = "Untitled note.txt", content = "", language = langua
   return { id: crypto.randomUUID(), name, content, language, dirty: false };
 }
 
+const notesStorageKey = "netssh.engineer-notes";
+
+type PersistedNotes = {
+  documents: NoteDocument[];
+  activeId: string;
+  wrapLines: boolean;
+};
+
+function defaultNotes(): PersistedNotes {
+  const document = newDocument(
+    "Network notes.md",
+    "# Network engineer notes\n\nUse tabs for separate working documents. Save configuration, change plans, sanitized outputs, and handover notes as local files.\n\nRemove passwords, private keys, tokens, and SNMP communities before saving or sharing notes.\n",
+    "markdown",
+  );
+  return { documents: [document], activeId: document.id, wrapLines: true };
+}
+
+function isNoteLanguage(value: unknown): value is NoteLanguage {
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(languageLabels, value);
+}
+
+function readPersistedDocument(value: unknown): NoteDocument | null {
+  if (!value || typeof value !== "object") return null;
+  const candidate = value as Partial<NoteDocument>;
+  if (typeof candidate.id !== "string" || typeof candidate.name !== "string" || typeof candidate.content !== "string") return null;
+  return {
+    id: candidate.id,
+    name: candidate.name,
+    path: typeof candidate.path === "string" ? candidate.path : undefined,
+    content: candidate.content,
+    language: isNoteLanguage(candidate.language) ? candidate.language : languageForFile(candidate.name),
+    dirty: candidate.dirty === true,
+  };
+}
+
+function loadPersistedNotes(): PersistedNotes {
+  const fallback = defaultNotes();
+  if (typeof window === "undefined") return fallback;
+  try {
+    const stored = window.localStorage.getItem(notesStorageKey);
+    if (!stored) return fallback;
+    const parsed = JSON.parse(stored) as { documents?: unknown; activeId?: unknown; wrapLines?: unknown };
+    const documents = Array.isArray(parsed.documents)
+      ? parsed.documents.map(readPersistedDocument).filter((document): document is NoteDocument => document !== null)
+      : [];
+    if (!documents.length) return fallback;
+    const activeId = typeof parsed.activeId === "string" && documents.some((document) => document.id === parsed.activeId)
+      ? parsed.activeId
+      : documents[0].id;
+    return { documents, activeId, wrapLines: parsed.wrapLines !== false };
+  } catch {
+    return fallback;
+  }
+}
+
 function downloadText(name: string, content: string) {
   const url = URL.createObjectURL(new Blob([content], { type: "text/plain;charset=utf-8" }));
   const anchor = document.createElement("a");
@@ -103,18 +158,26 @@ function cursorPosition(content: string, position: number) {
 }
 
 export function EngineerNotes({ notify }: { notify: (message: string) => void }) {
-  const initial = newDocument("Network notes.md", "# Network engineer notes\n\nUse tabs for separate working documents. Save configuration, change plans, sanitized outputs, and handover notes as local files.\n\nRemove passwords, private keys, tokens, and SNMP communities before saving or sharing notes.\n", "markdown");
-  const [documents, setDocuments] = useState<NoteDocument[]>([initial]);
-  const [activeId, setActiveId] = useState(initial.id);
+  const [savedNotes] = useState(loadPersistedNotes);
+  const [documents, setDocuments] = useState<NoteDocument[]>(savedNotes.documents);
+  const [activeId, setActiveId] = useState(savedNotes.activeId);
   const [templateName, setTemplateName] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
-  const [wrapLines, setWrapLines] = useState(true);
+  const [wrapLines, setWrapLines] = useState(savedNotes.wrapLines);
   const [error, setError] = useState("");
   const [cursor, setCursor] = useState({ line: 1, column: 1 });
   const [editorScrollTop, setEditorScrollTop] = useState(0);
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(notesStorageKey, JSON.stringify({ documents, activeId, wrapLines }));
+    } catch {
+      // Notes still work if browser storage is unavailable or full.
+    }
+  }, [documents, activeId, wrapLines]);
 
   const active = documents.find((document) => document.id === activeId) ?? documents[0];
   const lineCount = active?.content.split("\n").length ?? 1;
@@ -304,7 +367,7 @@ export function EngineerNotes({ notify }: { notify: (message: string) => void })
       <div className="notes-sidebar-heading"><div><h3>Engineer templates</h3><p>Start with a useful structure</p></div><FileText size={19} /></div>
       <div className="notes-template-picker"><select value={templateName} onChange={(event) => setTemplateName(event.target.value)}><option value="">Choose a template…</option>{templates.map((template) => <option value={template.name} key={template.name}>{template.name}</option>)}</select><button className="notes-tool-button notes-tool-primary" onClick={createFromTemplate} disabled={!templateName}>Create note</button></div>
       <div className="notes-template-list">{templates.map((template) => <button key={template.name} onClick={() => { setTemplateName(template.name); }}><span><strong>{template.name}</strong><small>{languageLabels[template.language]} · {template.fileName}</small></span><Plus size={14} /></button>)}</div>
-      <div className="notes-tip"><Check size={15} /><span>Notes stay in memory until you save them. Use Ctrl+S regularly and sanitize secrets before sharing files.</span></div>
+      <div className="notes-tip"><Check size={15} /><span>Notes are saved locally on this device automatically. Use Save to write a copy to disk, and sanitize secrets before sharing files.</span></div>
     </aside>
     <input ref={fileInputRef} className="notes-hidden-file" type="file" accept=".txt,.md,.cfg,.conf,.log,.yaml,.yml,.json,.ini,.csv,.sh" onChange={(event) => void handleBrowserFile(event)} />
   </div>;

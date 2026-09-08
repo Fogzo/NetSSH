@@ -8,6 +8,7 @@ export interface LivePortAuditResult {
   interfaceStatus: string;
   lineProtocol: string;
   lastInput: string;
+  lastOutput: string;
   inactiveWeeks: number | null;
   protected: boolean;
   candidate: boolean;
@@ -53,16 +54,23 @@ export function parseCiscoInterfaceAudit(output: string, minimumWeeks: number): 
     const end = starts[index + 1]?.index ?? output.length;
     const block = output.slice(start, end);
     const description = block.match(/^\s*Description:\s*(.+)$/mi)?.[1]?.trim() ?? "";
-    const lastInput = block.match(/^\s*Last input\s+([^,\s]+)/mi)?.[1] ?? "unknown";
-    const inactiveWeeks = inactivityWeeks(lastInput);
+    const activityMatch = block.match(/^\s*Last input\s+([^,\s]+),\s*output\s+([^,\s]+)/mi);
+    const lastInput = activityMatch?.[1] ?? block.match(/^\s*Last input\s+([^,\s]+)/mi)?.[1] ?? "unknown";
+    const lastOutput = activityMatch?.[2] ?? block.match(/^\s*Last output\s+([^,\s]+)/mi)?.[1] ?? "unknown";
+    const inputWeeks = inactivityWeeks(lastInput);
+    const outputWeeks = inactivityWeeks(lastOutput);
+    const inactiveWeeks = inputWeeks != null && outputWeeks != null && (Number.isFinite(inputWeeks) || Number.isFinite(outputWeeks))
+      ? Math.min(inputWeeks, outputWeeks)
+      : null;
     const interfaceStatus = match[2].trim();
     const lineProtocol = match[3].trim();
     const down = /(?:down|disabled|notconnect)/i.test(interfaceStatus) || /down/i.test(lineProtocol);
-    const oldEnough = inactiveWeeks === Number.POSITIVE_INFINITY || (inactiveWeeks != null && inactiveWeeks >= minimumWeeks);
+    const oldEnough = inputWeeks != null && outputWeeks != null && inputWeeks >= minimumWeeks && outputWeeks >= minimumWeeks;
     const protectedPort = protectedDescription.test(description);
     const candidate = down && oldEnough && !protectedPort;
-    const reason = !down ? "Interface is currently active" : !oldEnough ? `Last input is newer than ${minimumWeeks} weeks` : protectedPort ? "Description suggests infrastructure; investigate" : lastInput === "never" ? "No input recorded since the last counter reset/reload" : `No input recorded for approximately ${inactiveWeeks} weeks`;
-    return [{ port, description, interfaceStatus, lineProtocol, lastInput, inactiveWeeks: Number.isFinite(inactiveWeeks) ? inactiveWeeks : null, protected: protectedPort, candidate, reason }];
+    const noTrafficSinceReset = inputWeeks === Number.POSITIVE_INFINITY && outputWeeks === Number.POSITIVE_INFINITY;
+    const reason = !down ? "Interface is currently active" : !oldEnough ? `Input or output traffic is newer than ${minimumWeeks} weeks` : protectedPort ? "Description suggests infrastructure; investigate" : noTrafficSinceReset ? "No input or output recorded since the last counter reset/reload" : `No input or output recorded for approximately ${inactiveWeeks} weeks`;
+    return [{ port, description, interfaceStatus, lineProtocol, lastInput, lastOutput, inactiveWeeks, protected: protectedPort, candidate, reason }];
   });
 }
 
@@ -100,7 +108,7 @@ function csvValue(value: string | number | null) {
 }
 
 export function createSwitchAuditCsv(audit: LiveSwitchAudit): string {
-  const rows = [["Switch", "Address", "Port", "Description", "Interface status", "Line protocol", "Last input", "Approx. inactive weeks", "Protected", "Recommendation", "Reason"]];
-  audit.ports.filter((port) => port.candidate).forEach((port) => rows.push([audit.deviceName, audit.address, port.port, port.description, port.interfaceStatus, port.lineProtocol, port.lastInput, port.inactiveWeeks == null ? "" : String(port.inactiveWeeks), "No", "Review for shutdown", port.reason]));
+  const rows = [["Switch", "Address", "Port", "Description", "Interface status", "Line protocol", "Last input", "Last output", "Approx. inactive weeks", "Protected", "Recommendation", "Reason"]];
+  audit.ports.filter((port) => port.candidate).forEach((port) => rows.push([audit.deviceName, audit.address, port.port, port.description, port.interfaceStatus, port.lineProtocol, port.lastInput, port.lastOutput, port.inactiveWeeks == null ? "" : String(port.inactiveWeeks), "No", "Review for shutdown", port.reason]));
   return rows.map((row) => row.map(csvValue).join(",")).join("\r\n");
 }
