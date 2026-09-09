@@ -58,6 +58,7 @@ export async function startTerminalSession(options: {
   baudRate?: number;
   username?: string;
   password?: string;
+  autoLogin?: boolean;
   trustedFingerprint?: string;
   legacyRsa?: boolean;
   legacyKex?: boolean;
@@ -74,6 +75,7 @@ export async function startTerminalSession(options: {
     baudRate: options.baudRate ?? null,
     username: options.username ?? "",
     password: options.password ?? null,
+    autoLogin: options.autoLogin ?? true,
     columns: options.columns ?? 120,
     rows: options.rows ?? 36,
   });

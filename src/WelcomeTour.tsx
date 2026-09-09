@@ -20,7 +20,7 @@ export type WelcomeTourResult = {
   platforms: string[];
   credential?: {
     profile: CredentialProfile;
-    password: string;
+    password?: string;
     enablePassword?: string;
   };
   importDemoData: boolean;
@@ -67,6 +67,7 @@ export function WelcomeTour({ profile, preferences, demoDevices, onClose, onComp
   const [vaultLabel, setVaultLabel] = useState("Network Admin");
   const [vaultUsername, setVaultUsername] = useState("");
   const [vaultPassword, setVaultPassword] = useState("");
+  const [vaultAutoLogin, setVaultAutoLogin] = useState(true);
   const [enablePassword, setEnablePassword] = useState("");
   const [sites, setSites] = useState(() => uniqueValues(preferences.sites));
   const [siteInput, setSiteInput] = useState("");
@@ -99,8 +100,8 @@ export function WelcomeTour({ profile, preferences, demoDevices, onClose, onComp
   const next = () => {
     setError("");
     if (step === 2 && createVaultLogin && nativeVault) {
-      if (!vaultLabel.trim() || !vaultUsername.trim() || !vaultPassword) {
-        setError("Enter a profile label, username, and password, or leave the vault step switched off.");
+      if (!vaultLabel.trim() || !vaultUsername.trim()) {
+        setError("Enter a profile label and username, or leave the vault step switched off.");
         return;
       }
     }
@@ -119,8 +120,8 @@ export function WelcomeTour({ profile, preferences, demoDevices, onClose, onComp
       importDemoData: skipSetup ? false : importDemoData,
       ...(!skipSetup && createVaultLogin && nativeVault ? {
         credential: {
-          profile: { id: `credential-${crypto.randomUUID()}`, label: vaultLabel.trim(), username: vaultUsername.trim() },
-          password: vaultPassword,
+          profile: { id: `credential-${crypto.randomUUID()}`, label: vaultLabel.trim(), username: vaultUsername.trim(), autoLogin: vaultAutoLogin },
+          password: vaultPassword || undefined,
           enablePassword: enablePassword || undefined,
         },
       } : {}),
@@ -150,7 +151,7 @@ export function WelcomeTour({ profile, preferences, demoDevices, onClose, onComp
       <div className="onboarding-section-heading"><span className="onboarding-section-icon"><LockKeyhole size={20} /></span><div><span className="eyebrow">Optional security setup</span><h2>Create a saved login</h2><p>Use one reusable username and password for several devices. NetSSH stores the secrets in the Windows or macOS credential vault, not in its settings.</p></div></div>
       {!nativeVault ? <div className="onboarding-unavailable"><ShieldCheck size={18} /><div><strong>Desktop vault setup is available in the native app</strong><span>You can skip this step in the browser preview and create the profile later from Credentials.</span></div></div> : <>
         <label className={`onboarding-option ${createVaultLogin ? "selected" : ""}`}><input type="checkbox" checked={createVaultLogin} onChange={(event) => { setCreateVaultLogin(event.target.checked); setError(""); }} /><span><strong>Create a reusable login now</strong><small>You can still connect with one-time credentials whenever you prefer.</small></span></label>
-        {createVaultLogin && <div className="onboarding-fields onboarding-vault-fields"><label><span>Profile label</span><input autoFocus value={vaultLabel} onChange={(event) => setVaultLabel(event.target.value)} placeholder="Network Admin" /></label><label><span>Username</span><input value={vaultUsername} onChange={(event) => setVaultUsername(event.target.value)} autoComplete="username" placeholder="netadmin" /></label><label><span>Login password</span><input type="password" value={vaultPassword} onChange={(event) => setVaultPassword(event.target.value)} autoComplete="new-password" placeholder="Device login password" /></label><label><span>Enable password <em>optional</em></span><input type="password" value={enablePassword} onChange={(event) => setEnablePassword(event.target.value)} autoComplete="new-password" placeholder="Privileged EXEC secret" /></label></div>}
+        {createVaultLogin && <div className="onboarding-fields onboarding-vault-fields"><label><span>Profile label</span><input autoFocus value={vaultLabel} onChange={(event) => setVaultLabel(event.target.value)} placeholder="Network Admin" /></label><label><span>Username</span><input value={vaultUsername} onChange={(event) => setVaultUsername(event.target.value)} autoComplete="username" placeholder="netadmin" /></label><label className="onboarding-option onboarding-auto-login"><input type="checkbox" checked={vaultAutoLogin} onChange={(event) => setVaultAutoLogin(event.target.checked)} /><span><strong>Auto-login with saved password</strong><small>Turn off to use only the username and enter the SSH password for each session.</small></span></label><label><span>Login password <em>optional</em></span><input type="password" value={vaultPassword} onChange={(event) => setVaultPassword(event.target.value)} autoComplete="new-password" placeholder="Leave blank to ask at connection time" /></label><label><span>Enable password <em>optional</em></span><input type="password" value={enablePassword} onChange={(event) => setEnablePassword(event.target.value)} autoComplete="new-password" placeholder="Privileged EXEC secret" /></label></div>}
       </>}
       <div className="profile-privacy"><ShieldCheck size={15} /><span>Passwords are never written to localStorage or included in exports. They stay in the native operating-system vault.</span></div>
     </>;

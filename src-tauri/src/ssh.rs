@@ -805,6 +805,7 @@ pub async fn start_terminal_session(
     baud_rate: Option<u32>,
     username: String,
     password: Option<String>,
+    auto_login: bool,
     trusted_fingerprint: Option<String>,
     legacy_rsa: bool,
     legacy_kex: bool,
@@ -820,12 +821,16 @@ pub async fn start_terminal_session(
     let password = if protocol == "serial" {
         password.filter(|value| !value.is_empty())
     } else {
-        match super::resolve_login_password(password, credential_id.as_deref(), &device_id) {
-            Ok(password) => password,
-            Err(error) => {
-                vault_warning = Some(error);
-                None
+        if auto_login {
+            match super::resolve_login_password(password, credential_id.as_deref(), &device_id) {
+                Ok(password) => password,
+                Err(error) => {
+                    vault_warning = Some(error);
+                    None
+                }
             }
+        } else {
+            password.filter(|value| !value.is_empty())
         }
     };
     if let Some(warning) = vault_warning {

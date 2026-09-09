@@ -28,6 +28,8 @@ export interface CredentialProfile {
   id: string;
   label: string;
   username: string;
+  /** Use the password in the OS vault automatically when connecting. */
+  autoLogin?: boolean;
 }
 
 export interface ConnectionHistory {
