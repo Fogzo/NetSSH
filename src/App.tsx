@@ -8,7 +8,7 @@ import { check, type Update } from "@tauri-apps/plugin-updater";
 import { Terminal as XTerm } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import {
-  Activity, ArrowDownCircle, Bell, Bot, BrainCircuit, Calculator, Check, ChevronDown, ChevronRight, CircleDot, ClipboardCheck, ClipboardPaste,
+  Activity, ArrowDownCircle, Bell, Bot, BrainCircuit, Calculator, Check, ChevronDown, ChevronLeft, ChevronRight, CircleDot, ClipboardCheck, ClipboardPaste,
   Clock3, Code2, Command, Copy, Database, FileDown, FileText, FileUp, Gauge, Globe2, Grid2X2, HardDrive,
   KeyRound, Layers3, Menu, MoreHorizontal, Network, PanelLeftClose, Pencil, Plus, Rss,
   ExternalLink, Eye, EyeOff, LockKeyhole, Radio, RefreshCw, Router, Search, Send, Server, Settings, ShieldCheck, Sparkles, Star,
@@ -140,6 +140,14 @@ function safeFileName(value: string) {
   return value.trim().replace(/[^a-z0-9._-]+/gi, "-").replace(/^-+|-+$/g, "") || "terminal";
 }
 
+function normalizeSearchValue(value: string) {
+  return value
+    .toLocaleLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9]/g, "");
+}
+
 async function saveTerminalTranscript(session: Session) {
   const protocol = (session.host.protocol ?? "ssh").toUpperCase();
   const exportedAt = new Date();
@@ -187,11 +195,6 @@ function App() {
       return import.meta.env.DEV ? [...ciscoDemoHosts, ...initialHosts] : initialHosts;
     }
   });
-  const deviceHostsRef = useRef(deviceHosts);
-  const reachabilityInFlightRef = useRef(false);
-  const [reachabilityRefreshing, setReachabilityRefreshing] = useState(false);
-  const [reachabilityLastChecked, setReachabilityLastChecked] = useState<number | null>(null);
-  deviceHostsRef.current = deviceHosts;
   const [credentialProfiles, setCredentialProfiles] = useState<CredentialProfile[]>(() => {
     try { return JSON.parse(localStorage.getItem("netssh.credentialProfiles") ?? "[]") as CredentialProfile[]; }
     catch { return []; }
@@ -249,47 +252,6 @@ function App() {
       return [];
     }
   });
-
-  const refreshReachability = useCallback(async () => {
-    if (reachabilityInFlightRef.current) return;
-    const targets = deviceHostsRef.current.filter((host) => !host.demoProfile && isNetworkHost(host));
-    if (!targets.length) {
-      return;
-    }
-    reachabilityInFlightRef.current = true;
-    setReachabilityRefreshing(true);
-    try {
-      const checks: Array<{ id: string; status: Host["status"]; latency: number | null }> = await Promise.all(targets.map(async (host) => {
-        const protocol = host.protocol ?? "ssh";
-        try {
-          const result = await preflightConnection(protocol, host.address, protocol === "serial" ? undefined : host.port ?? (protocol === "telnet" ? 23 : 22), host.baudRate);
-          return { id: host.id, status: result.reachable ? "online" : "offline", latency: result.reachable ? Math.max(1, Math.round(result.elapsedMs)) : null };
-        } catch {
-          return { id: host.id, status: "offline", latency: null };
-        }
-      }));
-      const byId = new Map(checks.map((check) => [check.id, check]));
-      setDeviceHosts((current) => current.map((host) => {
-        const check = byId.get(host.id);
-        return check ? { ...host, status: check.status, latency: check.latency } : host;
-      }));
-      setReachabilityLastChecked(Date.now());
-    } finally {
-      reachabilityInFlightRef.current = false;
-      setReachabilityRefreshing(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    const initialCheck = window.setTimeout(() => { void refreshReachability(); }, 800);
-    const interval = window.setInterval(() => {
-      if (!document.hidden) void refreshReachability();
-    }, 45_000);
-    return () => {
-      window.clearTimeout(initialCheck);
-      window.clearInterval(interval);
-    };
-  }, [refreshReachability]);
 
   useEffect(() => {
     if (!isTauri()) return;
@@ -729,9 +691,9 @@ function App() {
       <main className={`main ${sidebarOpen ? "" : "main-expanded"}`}>
         <Topbar view={view} onSearch={() => setSearchOpen(true)} notifications={notifications} notificationsOpen={notificationsOpen} onToggleNotifications={() => { setNotificationsOpen((open) => !open); setSettingsOpen(false); setNotifications((current) => current.map((item) => ({ ...item, read: true }))); }} onClearNotifications={() => setNotifications([])} onOpenSettings={() => { setSettingsOpen(true); setNotificationsOpen(false); }} />
         <div className="content">
-          {view === "inventory" && <div className="inventory-discovery-launcher"><button className="secondary-button" onClick={() => void refreshReachability()} disabled={reachabilityRefreshing}><RefreshCw size={15} className={reachabilityRefreshing ? "spin" : ""} /> {reachabilityRefreshing ? "Checking reachability…" : "Check reachability"}</button><button className="secondary-button" onClick={() => setDeviceDiscoveryOpen(true)}><Network size={15} /> Discover device range</button></div>}
+          {view === "inventory" && <div className="inventory-discovery-launcher"><button className="secondary-button" onClick={() => setDeviceDiscoveryOpen(true)}><Network size={15} /> Discover device range</button></div>}
           {view === "workspace" && (
-            <Workspace sessions={sessions} activeId={activeSession} session={currentSession} hosts={deviceHosts} userName={userProfile.name} autocompleteEnabled={preferences.cliAutocomplete} onAuthenticate={authenticateSession} onReconnect={reconnectSession} onActivate={setActiveSession} onClose={closeSession} onCloseMany={closeSessions} onConnect={connect} onNewSession={(host) => connect(host, true)} onCommand={appendLines} onTerminalData={sendTerminalData} onAddDevice={() => setAddDeviceOpen(true)} onShowInventory={() => setView("inventory")} onRefreshReachability={refreshReachability} reachabilityRefreshing={reachabilityRefreshing} reachabilityLastChecked={reachabilityLastChecked} notify={notify} />
+            <Workspace sessions={sessions} activeId={activeSession} session={currentSession} hosts={deviceHosts} userName={userProfile.name} autocompleteEnabled={preferences.cliAutocomplete} onAuthenticate={authenticateSession} onReconnect={reconnectSession} onActivate={setActiveSession} onClose={closeSession} onCloseMany={closeSessions} onConnect={connect} onNewSession={(host) => connect(host, true)} onCommand={appendLines} onTerminalData={sendTerminalData} onAddDevice={() => setAddDeviceOpen(true)} onShowInventory={() => setView("inventory")} notify={notify} />
           )}
           {view === "inventory" && <Inventory hosts={deviceHosts} onConnect={connect} onAdd={() => setAddDeviceOpen(true)} onTransfer={() => setSessionTransferOpen(true)} onEdit={setEditingHost} onFavorite={(id) => setDeviceHosts((current) => current.map((host) => host.id === id ? { ...host, favorite: !host.favorite } : host))} onDelete={(id) => { setDeviceHosts((current) => current.filter((host) => host.id !== id)); deleteDevicePassword(id).catch(() => undefined); notify("Device removed"); }} />}
           {view === "topology" && <TopologyDesigner hosts={deviceHosts} onConnect={(host) => { setView("workspace"); void connect(host); }} notify={notify} />}
@@ -990,7 +952,7 @@ function SessionConnectionBadges({ session, compact = false }: { session: Sessio
   return <div className={`session-connection-badges ${compact ? "compact" : ""}`}><span className={`terminal-info-badge ${connectionTone}`}><CircleDot size={10} />{stateLabel}</span><span className={`terminal-info-badge protocol ${protocol}`}><ShieldCheck size={10} />{protocol === "ssh" ? "SSH encrypted" : protocol === "telnet" ? "Telnet unencrypted" : "Local serial"}</span><span className={`terminal-info-badge ${reachabilityTone}`}><Router size={10} />{displayStatusLabel(session.host)}</span>{session.host.latency != null && <span className={`terminal-info-badge latency-badge ${latencyTone}`}><Activity size={10} />{session.host.latency} ms</span>}</div>;
 }
 
-function Workspace({ sessions, activeId, session, hosts, userName, autocompleteEnabled, onAuthenticate, onReconnect, onActivate, onClose, onCloseMany, onConnect, onNewSession, onCommand, onTerminalData, onAddDevice, onShowInventory, onRefreshReachability, reachabilityRefreshing, reachabilityLastChecked, notify }: { sessions: Session[]; activeId: string | null; session?: Session; hosts: Host[]; userName: string; autocompleteEnabled: boolean; onAuthenticate: (id: string, credentials: ConnectionCredentials) => Promise<void>; onReconnect: (id: string) => Promise<void>; onActivate: (id: string) => void; onClose: (id: string) => void; onCloseMany: (ids: string[]) => void; onConnect: (host: Host) => void; onNewSession: (host: Host) => Promise<string | null>; onCommand: (id: string, lines: TerminalLine[]) => void; onTerminalData: (id: string, data: string) => void; onAddDevice: () => void; onShowInventory: () => void; onRefreshReachability: () => Promise<void>; reachabilityRefreshing: boolean; reachabilityLastChecked: number | null; notify: (message: string) => void }) {
+function Workspace({ sessions, activeId, session, hosts, userName, autocompleteEnabled, onAuthenticate, onReconnect, onActivate, onClose, onCloseMany, onConnect, onNewSession, onCommand, onTerminalData, onAddDevice, onShowInventory, notify }: { sessions: Session[]; activeId: string | null; session?: Session; hosts: Host[]; userName: string; autocompleteEnabled: boolean; onAuthenticate: (id: string, credentials: ConnectionCredentials) => Promise<void>; onReconnect: (id: string) => Promise<void>; onActivate: (id: string) => void; onClose: (id: string) => void; onCloseMany: (ids: string[]) => void; onConnect: (host: Host) => void; onNewSession: (host: Host) => Promise<string | null>; onCommand: (id: string, lines: TerminalLine[]) => void; onTerminalData: (id: string, data: string) => void; onAddDevice: () => void; onShowInventory: () => void; notify: (message: string) => void }) {
   const [layout, setLayout] = useState<"single" | "split" | "ai" | "notes">("single");
   const [primaryId, setPrimaryId] = useState<string | null>(activeId);
   const [secondaryId, setSecondaryId] = useState<string | null>(null);
@@ -999,6 +961,8 @@ function Workspace({ sessions, activeId, session, hosts, userName, autocompleteE
   const [sessionMenuOpen, setSessionMenuOpen] = useState(false);
   const [tabContextMenu, setTabContextMenu] = useState<{ id: string; x: number; y: number } | null>(null);
   const [aiWebMode, setAiWebMode] = useState(false);
+  const tabStripRef = useRef<HTMLDivElement>(null);
+  const [tabScroll, setTabScroll] = useState({ left: false, right: false });
   const primary = sessions.find((item) => item.id === primaryId) ?? session;
   const secondary = sessions.find((item) => item.id === secondaryId);
   useEffect(() => {
@@ -1027,7 +991,31 @@ function Workspace({ sessions, activeId, session, hosts, userName, autocompleteE
     window.addEventListener("keydown", closeOnEscape);
     return () => { window.removeEventListener("click", closeMenu); window.removeEventListener("blur", closeMenu); window.removeEventListener("keydown", closeOnEscape); };
   }, [tabContextMenu]);
-  if (!session || !primary) return <WorkspaceHome hosts={hosts} userName={userName} onConnect={onConnect} onAddDevice={onAddDevice} onShowInventory={onShowInventory} onRefreshReachability={onRefreshReachability} reachabilityRefreshing={reachabilityRefreshing} reachabilityLastChecked={reachabilityLastChecked} />;
+  useEffect(() => {
+    const strip = tabStripRef.current;
+    if (!strip) return;
+    const updateScrollState = () => {
+      setTabScroll({
+        left: strip.scrollLeft > 2,
+        right: strip.scrollLeft + strip.clientWidth < strip.scrollWidth - 2,
+      });
+    };
+    const frame = window.requestAnimationFrame(() => {
+      updateScrollState();
+      strip.querySelector<HTMLElement>(".session-tab.active")?.scrollIntoView({ behavior: "smooth", block: "nearest", inline: "nearest" });
+    });
+    strip.addEventListener("scroll", updateScrollState, { passive: true });
+    window.addEventListener("resize", updateScrollState);
+    const observer = new ResizeObserver(updateScrollState);
+    observer.observe(strip);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      strip.removeEventListener("scroll", updateScrollState);
+      window.removeEventListener("resize", updateScrollState);
+      observer.disconnect();
+    };
+  }, [sessions.length, activeId]);
+  if (!session || !primary) return <WorkspaceHome hosts={hosts} userName={userName} onConnect={onConnect} onAddDevice={onAddDevice} onShowInventory={onShowInventory} />;
   const toggleSplit = () => {
     if (layout === "split") { setLayout("single"); return; }
     const available = sessions.find((item) => item.id !== primary.id);
@@ -1070,8 +1058,12 @@ function Workspace({ sessions, activeId, session, hosts, userName, autocompleteE
   return (
     <section className="terminal-layout">
       <div className="session-tabs">
-        {sessions.map((item) => <button key={item.id} className={`session-tab ${item.id === activeId ? "active" : ""}`} onClick={() => activateTab(item.id)} onContextMenu={(event) => { event.preventDefault(); setSessionMenuOpen(false); setTabContextMenu({ id: item.id, x: Math.min(event.clientX, window.innerWidth - 225), y: Math.min(event.clientY, window.innerHeight - 145) }); }}><span className={`device-state ${item.host.status}`} /><span>{item.host.name}</span><X size={13} onClick={(event) => { event.stopPropagation(); onClose(item.id); }} /></button>)}
-        <button className="new-tab" aria-label="Open new session tab" title="Open new session tab" onClick={() => setPickerMode("tab")}><Plus size={15} /></button>
+        <button className="session-tabs-nav" disabled={!tabScroll.left} aria-label="Scroll terminal tabs left" title="Scroll terminal tabs left" onClick={() => tabStripRef.current?.scrollBy({ left: -240, behavior: "smooth" })}><ChevronLeft size={15} /></button>
+        <div className="session-tabs-scroll" ref={tabStripRef}>
+          {sessions.map((item) => <button key={item.id} className={`session-tab ${item.id === activeId ? "active" : ""}`} onClick={() => activateTab(item.id)} onContextMenu={(event) => { event.preventDefault(); setSessionMenuOpen(false); setTabContextMenu({ id: item.id, x: Math.min(event.clientX, window.innerWidth - 225), y: Math.min(event.clientY, window.innerHeight - 145) }); }}><span className={`device-state ${item.host.status}`} /><span>{item.host.name}</span><X size={13} onClick={(event) => { event.stopPropagation(); onClose(item.id); }} /></button>)}
+          <button className="new-tab" aria-label="Open new session tab" title="Open new session tab" onClick={() => setPickerMode("tab")}><Plus size={15} /></button>
+        </div>
+        <button className="session-tabs-nav" disabled={!tabScroll.right} aria-label="Scroll terminal tabs right" title="Scroll terminal tabs right" onClick={() => tabStripRef.current?.scrollBy({ left: 240, behavior: "smooth" })}><ChevronRight size={15} /></button>
       </div>
       {tabContextMenu && <div className="tab-context-menu" style={{ left: tabContextMenu.x, top: tabContextMenu.y }} onClick={(event) => event.stopPropagation()}><button onClick={() => { onClose(tabContextMenu.id); setTabContextMenu(null); }}><X size={14} /><span>Close tab</span></button><button disabled={sessions.length < 2} onClick={() => { onCloseMany(sessions.filter((item) => item.id !== tabContextMenu.id).map((item) => item.id)); setTabContextMenu(null); }}><Layers3 size={14} /><span>Close other tabs</span></button><div /><button className="menu-danger" onClick={() => { onCloseMany(sessions.map((item) => item.id)); setTabContextMenu(null); }}><Trash2 size={14} /><span>Close all tabs</span></button></div>}
       <div className="terminal-toolbar"><div className="terminal-toolbar-device"><CircleDot size={14} /><strong>{primary.host.name}</strong><span className="terminal-toolbar-address">{primary.host.address}</span><SessionConnectionBadges session={primary} /></div><div className="terminal-toolbar-actions"><button className="terminal-toolbar-action" disabled={primary.connectionState === "connecting"} aria-label={`Reconnect ${primary.host.name}`} title={`Reconnect ${primary.host.name}`} onClick={() => void onReconnect(primary.id)}><RefreshCw size={14} className={primary.connectionState === "connecting" ? "spin" : ""} /><span>Reconnect</span></button><button className="terminal-toolbar-action" disabled={!primary.lines.length} aria-label={`Save ${primary.host.name} terminal transcript`} title="Save terminal transcript as a text file" onClick={() => void saveLog()}><FileDown size={14} /><span>Save log</span></button><button className={layout === "split" ? "toolbar-active" : ""} aria-label="Toggle split sessions" title="Toggle split sessions" onClick={toggleSplit}><Grid2X2 size={15} /></button><button className={layout === "notes" ? "toolbar-active" : ""} aria-label="Split with Engineer Notes" title="Split with Engineer Notes" onClick={() => setLayout(layout === "notes" ? "single" : "notes")}><FileText size={15} /></button><button className={layout === "ai" ? "toolbar-active" : ""} aria-label="Toggle AI side panel" title="Toggle AI side panel" onClick={() => setLayout(layout === "ai" ? "single" : "ai")}><Bot size={15} /></button><div className="session-menu-wrap"><button className={sessionMenuOpen ? "toolbar-active" : ""} aria-label="Session options" onClick={() => { setTabContextMenu(null); setSessionMenuOpen((open) => !open); }}><MoreHorizontal size={16} /></button>{sessionMenuOpen && <div className="session-menu"><button onClick={async () => { setSessionMenuOpen(false); await onNewSession(primary.host); }}><Plus size={14} /><span><strong>Duplicate tab</strong><small>Open another independent session</small></span></button><button onClick={() => { setSessionMenuOpen(false); toggleSplit(); }}><Grid2X2 size={14} /><span><strong>{layout === "split" ? "Close split view" : "Split with session"}</strong><small>{layout === "split" ? "Return to one pane" : "Choose a second device pane"}</small></span></button><button onClick={() => { setSessionMenuOpen(false); setLayout(layout === "notes" ? "single" : "notes"); }}><FileText size={14} /><span><strong>{layout === "notes" ? "Close Engineer Notes" : "Split with Engineer Notes"}</strong><small>{layout === "notes" ? "Return to one pane" : "Keep notes beside this terminal"}</small></span></button><button onClick={() => { navigator.clipboard?.writeText(primary.host.address); setSessionMenuOpen(false); notify("Address copied"); }}><Copy size={14} /><span><strong>Copy address</strong><small>{primary.host.address}</small></span></button>{primary.host.credentialId && <button onClick={() => { setSessionMenuOpen(false); writeTerminalEnablePassword(primary.id, primary.host.credentialId!).then(() => notify("Enable password sent securely")).catch((caught) => notify((caught as Error).message)); }}><KeyRound size={14} /><span><strong>Send enable password</strong><small>Use only at the device enable prompt</small></span></button>}<button className="menu-danger" onClick={() => { setSessionMenuOpen(false); onClose(primary.id); }}><Trash2 size={14} /><span><strong>Close session</strong><small>Close this workspace tab</small></span></button><button className="menu-danger" onClick={() => { setSessionMenuOpen(false); onCloseMany(sessions.map((item) => item.id)); }}><Trash2 size={14} /><span><strong>Close all sessions</strong><small>Close every workspace tab</small></span></button></div>}</div></div></div>
@@ -1140,16 +1132,11 @@ function AiSidePanel({ session, notify, onWebModeChange }: { session: Session; n
   return <aside className="workspace-ai"><div className="workspace-ai-head"><div><span><BrainCircuit size={16} /></span><div><strong>Network copilot</strong><small>Beside {session.host.name}</small></div></div><div className="provider-select"><span className="provider-dot" style={{ background: aiProviders[webProvider ?? provider].accent }} /><select value={webProvider ? `${webProvider}-web` : provider} onChange={(event) => selectProvider(event.target.value)} aria-label="Side panel AI provider"><option value="demo">Demo</option><option value="openai">OpenAI API</option><option value="gemini">Gemini API</option><option value="openai-web">ChatGPT Web</option><option value="gemini-web">Gemini Web</option></select><ChevronDown size={13} /></div></div>{webProvider ? <EmbeddedProviderView provider={webProvider} notify={notify} compact onExternal={() => setWebProvider(null)} /> : <><div className="workspace-ai-notice"><ShieldCheck size={13} />Session output is excluded unless you enable context.</div><div className="side-chat-scroll">{messages.map((message) => <ChatMessage key={message.id} message={message} provider={provider} />)}{sending && <div className="chat-message assistant-message"><span className="message-avatar"><Bot size={15} /></span><div className="message-bubble typing"><i /><i /><i /></div></div>}<div ref={bottomRef} /></div><form className="side-composer" onSubmit={submit}><textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Ask about this session…" rows={3} /><label><input type="checkbox" checked={attachContext} onChange={(event) => setAttachContext(event.target.checked)} /><span><Layers3 size={12} /> Include recent session context</span></label><button className="primary-button" disabled={!draft.trim() || sending}><Send size={14} /> Send</button></form></>}</aside>;
 }
 
-function WorkspaceHome({ hosts, userName, onConnect, onAddDevice, onShowInventory, onRefreshReachability, reachabilityRefreshing, reachabilityLastChecked }: { hosts: Host[]; userName: string; onConnect: (host: Host) => void; onAddDevice: () => void; onShowInventory: () => void; onRefreshReachability: () => Promise<void>; reachabilityRefreshing: boolean; reachabilityLastChecked: number | null }) {
+function WorkspaceHome({ hosts, userName, onConnect, onAddDevice, onShowInventory }: { hosts: Host[]; userName: string; onConnect: (host: Host) => void; onAddDevice: () => void; onShowInventory: () => void }) {
   const [advisories, setAdvisories] = useState<SecurityAdvisory[]>(securityFeedFallback);
   const [feedLoading, setFeedLoading] = useState(true);
   const [feedStatus, setFeedStatus] = useState("Loading official feeds");
   const networkHosts = hosts.filter(isNetworkHost);
-  const reachableCount = networkHosts.filter((host) => host.status === "online").length;
-  const attentionCount = networkHosts.filter((host) => host.status !== "online").length;
-  const latencies = networkHosts.map((host) => host.latency).filter((latency): latency is number => latency != null);
-  const averageLatency = latencies.length ? `${Math.round(latencies.reduce((total, latency) => total + latency, 0) / latencies.length)} ms` : "—";
-  const pulseStatus = reachabilityRefreshing ? "Checking reachability…" : networkHosts.length ? reachabilityLastChecked ? `Checked ${new Date(reachabilityLastChecked).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : "Waiting for first check" : "No network devices to check";
   const refreshFeed = async () => {
     setFeedLoading(true);
     try {
@@ -1182,7 +1169,7 @@ function WorkspaceHome({ hosts, userName, onConnect, onAddDevice, onShowInventor
       <div className="section-heading"><div><h3>Jump back in</h3><p>Your recently accessed devices</p></div><button onClick={onShowInventory}>View inventory <ChevronRight size={15} /></button></div>
       <div className="device-grid">{hosts.slice(0, 4).map((host) => <DeviceCard key={host.id} host={host} onConnect={onConnect} />)}</div>
       <div className="dashboard-grid">
-        <section className="panel activity-panel"><div className="panel-title"><div><h3>Network pulse</h3><p>{pulseStatus}</p></div><button className={`feed-refresh ${reachabilityRefreshing ? "loading" : ""}`} onClick={() => void onRefreshReachability()} disabled={reachabilityRefreshing || !networkHosts.length} aria-label="Refresh network reachability" title="Refresh network reachability"><RefreshCw size={15} /></button></div><div className="metrics"><Metric icon={Gauge} value={networkHosts.length ? `${((reachableCount / networkHosts.length) * 100).toFixed(1)}%` : "—"} label="Availability" trend={reachabilityRefreshing ? "Checking…" : attentionCount ? `${attentionCount} alert${attentionCount === 1 ? "" : "s"}` : networkHosts.length ? "All reachable" : "No network devices"} warning={attentionCount > 0} /><Metric icon={Activity} value={averageLatency} label="Avg latency" trend={reachabilityLastChecked ? "Latest check" : "No check yet"} /><Metric icon={Server} value={`${reachableCount} / ${networkHosts.length}`} label="Reachable" trend={reachabilityRefreshing ? "Updating" : "Live status"} warning={attentionCount > 0} /></div></section>
+        <section className="panel activity-panel"><div className="panel-title"><div><h3>Network inventory</h3><p>Live state is shown after you connect</p></div><Server size={17} /></div><div className="metrics"><Metric icon={Gauge} value={`${networkHosts.length}`} label="Network devices" trend={networkHosts.length ? "Ready to connect" : "Add a device"} /><Metric icon={Activity} value={`${hosts.filter(isSerialHost).length}`} label="Serial devices" trend={hosts.some(isSerialHost) ? "Local ports" : "None configured"} /><Metric icon={Server} value={`${hosts.length}`} label="Inventory total" trend="Manual connection checks" /></div></section>
         <section className="panel command-panel"><div className="panel-title"><div><h3>Recent commands</h3><p>Run again in one click</p></div><button><MoreHorizontal size={17} /></button></div>{recentCommands.slice(0, 3).map((command) => <div className="command-row" key={command}><code>{command}</code><button><Copy size={14} /></button></div>)}</section>
       </div>
     </div>
@@ -1521,7 +1508,7 @@ function Inventory({ hosts, onConnect, onAdd, onTransfer, onEdit, onFavorite, on
   const [pendingDelete, setPendingDelete] = useState<Host | null>(null);
   const sites = [...new Set(hosts.map((host) => host.site))].sort();
   const filtered = hosts.filter((host) => {
-    const matchesQuery = `${host.name} ${host.address} ${host.platform} ${host.site} ${deviceRoleLabel(host)} ${(host.tags ?? []).join(" ")}`.toLowerCase().includes(query.toLowerCase());
+    const matchesQuery = normalizeSearchValue(`${host.name} ${host.address} ${host.platform} ${host.site} ${deviceRoleLabel(host)} ${(host.tags ?? []).join(" ")}`).includes(normalizeSearchValue(query));
     const matchesStatus = status === "all" || (status === "serial" ? isSerialHost(host) : isNetworkHost(host) && host.status === status);
     return matchesQuery && (site === "all" || host.site === site) && matchesStatus && (role === "all" || deviceRoleValue(host) === role);
   });
