@@ -1,0 +1,138 @@
+/* Keep DNAC data comfortable to read without changing the rest of the app's compact UI. */
+.client-search-heading h2,
+.network-health-heading h2{font-size:24px}
+.client-search-heading p,
+.network-health-heading p{font-size:12px;line-height:1.5}
+.client-search-heading .eyebrow,
+.network-health-heading .eyebrow{font-size:10px}
+.dnac-status{font-size:11px}
+.network-refresh{font-size:11px}
+
+.client-search-hero h3{font-size:16px}
+.client-search-hero p{color:#91a0a8;font-size:12px;line-height:1.55}
+.client-search-form label>span{font-size:11px}
+.client-search-form input{font-size:14px}
+.client-search-form .primary-button{font-size:12px}
+.dnac-setup-callout strong{font-size:14px}
+.dnac-setup-callout p{font-size:11px;line-height:1.55}
+.dnac-setup-callout button{font-size:11px}
+.dnac-search-error{font-size:12px;line-height:1.5}
+.client-search-empty strong{font-size:14px}
+.client-search-empty span{color:#9aa7ae;font-size:11px}
+
+.client-result-title>div>span{color:#91a0a8;font-size:10px;letter-spacing:.7px}
+.client-result-title h3{font-size:19px}
+.client-result-title p{color:#a6b4bb;font-size:12px}
+.client-health{font-size:11px}
+.client-card-heading strong{font-size:13px}
+.client-card-heading small{max-width:none;color:#8b9aa2;font-size:10px;line-height:1.4;overflow:visible;text-overflow:clip;white-space:normal}
+.dnac-field{min-height:61px;padding:10px}
+.dnac-field span{color:#91a0a8;font-size:10px;letter-spacing:.5px}
+.dnac-field strong{margin-top:7px;color:#d1dce1;font-size:13px;line-height:1.4;overflow-wrap:anywhere}
+.dnac-location{gap:8px}
+.dnac-location>div{min-height:68px;padding:10px;align-items:flex-start}
+.dnac-location small{color:#93a1a8;font-size:10px;white-space:normal}
+.dnac-location strong{color:#d1dce1;font-size:12px;line-height:1.4;white-space:normal;overflow-wrap:anywhere}
+.client-result-footer{min-height:39px;color:#91a097;font-size:10px;line-height:1.5;flex-wrap:wrap}
+
+.dnac-settings-status>span{font-size:12px}
+.dnac-settings-status small{font-size:10px}
+.dnac-settings-form label>span{font-size:11px}
+.dnac-settings-input{height:43px}
+.dnac-settings-input input{font-size:12px}
+.dnac-settings-options strong{font-size:12px}
+.dnac-settings-options small{color:#8998a0;font-size:10px;line-height:1.5}
+.dnac-settings-options label{min-height:86px}
+.dnac-certificate-warning,.dnac-test-message{font-size:11px;line-height:1.55}
+.dnac-test-actions>span{font-size:10px}
+.dnac-test-actions button{font-size:11px}
+
+.health-metric{min-height:100px;padding:13px;gap:11px}
+.health-metric-icon{width:35px;height:35px}
+.health-metric-copy{gap:5px}
+.health-metric-copy small{font-size:9px;letter-spacing:.65px}
+.health-metric-copy strong{font-size:22px}
+.health-metric-copy em{color:#94a1a8;font-size:10px}
+.network-section-heading h3{font-size:13px}
+.network-section-heading p{color:#929fa6;font-size:10px;line-height:1.5}
+.network-section-heading .eyebrow{font-size:9px}
+.attention-count,.network-small-count{font-size:11px}
+.network-device-filters button{height:31px;padding:0 10px;font-size:10px}
+.network-device-search,.network-site-search{height:35px}
+.network-device-search input,.network-site-search input{font-size:11px}
+.network-device-table th{height:35px;font-size:9px;letter-spacing:.45px}
+.network-device-table td{padding:10px;font-size:11px;line-height:1.4}
+.network-device-table td:nth-child(2) strong{font-size:12px}
+.network-device-table td:nth-child(2) small{font-size:10px}
+.network-device-table td code{font-size:10px}
+.health-severity{height:23px;padding:0 8px;font-size:9px}
+.network-table-empty strong{font-size:13px}
+.network-table-empty span{font-size:11px;line-height:1.5}
+.network-show-all{height:32px;font-size:10px}
+.network-table-foot{min-height:30px;font-size:9px;line-height:1.5}
+.network-site-tree-row{min-height:34px}
+.site-name-button{font-size:10px}
+.network-site-health,.network-site-device-count,.network-site-issue-count{font-size:10px}
+.network-site-tree-legend{min-height:27px;font-size:9px}
+.network-site-empty{font-size:11px}
+.network-client-group{padding:11px}
+.network-client-group strong{font-size:12px}
+.network-client-group small{font-size:10px}
+.network-client-group>div>b{font-size:11px}
+.network-client-group>section span{font-size:10px}
+.network-client-group>section b{font-size:10px}
+.network-category-breakdown>strong{font-size:9px}
+.network-category-breakdown>div{min-height:27px}
+.network-category-breakdown>div>span{font-size:10px}
+.network-category-breakdown em{font-size:10px}
+.network-health-updated{min-height:28px;font-size:9px;line-height:1.5}
+.network-health-updated span{color:#89969d}
+.network-health-loading strong{font-size:12px}
+.network-health-loading span{font-size:10px}
+.network-health-setup strong{font-size:13px}
+.network-health-setup p{font-size:11px;line-height:1.55}
+.network-health-setup button{font-size:11px}
+.network-section-warning,.network-section-note{font-size:11px;line-height:1.55}
+
+.network-device-detail>header .eyebrow{font-size:9px}
+.network-device-detail>header h3{font-size:16px}
+.network-device-detail>header small{font-size:11px}
+.network-detail-status{font-size:11px}
+.network-detail-score{font-size:13px}
+.network-detail-loading,.network-detail-note{font-size:10px;line-height:1.5}
+.network-detail-fields>div{padding:10px 2px}
+.network-detail-fields span{font-size:9px}
+.network-detail-fields strong{font-size:11px;line-height:1.45}
+.network-detail-interfaces{font-size:10px}
+.network-detail-interfaces strong{font-size:11px}
+.network-detail-interfaces small{font-size:9px;line-height:1.5}
+.network-detail-actions .primary-button{font-size:10px}
+.network-detail-actions small{font-size:9px;line-height:1.5}
+.network-device-detail>footer{font-size:9px;line-height:1.5}
+
+.theme-light .client-search-hero p,
+.theme-light .client-search-empty span{color:#526570}
+.theme-light .client-result-title>div>span,
+.theme-light .client-card-heading small,
+.theme-light .dnac-field span,
+.theme-light .dnac-location small{color:#5c707a}
+.theme-light .dnac-field strong,
+.theme-light .dnac-location strong{color:#2e434d}
+.theme-light .client-result-title p{color:#526872}
+.theme-light .network-section-heading p,
+.theme-light .health-metric-copy em{color:#596e78}
+.theme-light .network-table-empty span,
+.theme-light .network-table-foot,
+.theme-light .network-device-detail>footer{color:#5d717b}
+
+@media(max-width:680px){
+  .client-search-heading h2,.network-health-heading h2{font-size:22px}
+  .client-search-heading p,.network-health-heading p{font-size:11px}
+  .client-result-title h3{font-size:17px}
+  .client-result-grid{gap:9px}
+  .dnac-field strong{font-size:12px}
+  .network-device-controls{gap:8px}
+  .network-device-filters{gap:5px}
+  .network-device-filters button{font-size:9px}
+  .network-health-updated{font-size:9px}
+}

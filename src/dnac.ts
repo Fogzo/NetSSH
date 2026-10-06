@@ -42,6 +42,91 @@ export type DnacClient = {
   lastUpdated?: number;
 };
 
+export type DnacHealthCategory = {
+  category: string;
+  totalCount?: number | null;
+  healthScore?: number | null;
+  goodCount?: number | null;
+  fairCount?: number | null;
+  poorCount?: number | null;
+  noHealthCount?: number | null;
+  unmonitoredCount?: number | null;
+};
+
+export type DnacSiteHealth = {
+  siteName: string;
+  siteHierarchy?: string | null;
+  networkHealthAverage?: number | null;
+  deviceCount?: number | null;
+};
+
+export type DnacClientHealthScore = {
+  category: string;
+  clientCount?: number | null;
+};
+
+export type DnacClientHealth = {
+  category: string;
+  clientCount?: number | null;
+  healthScore?: number | null;
+  scores: DnacClientHealthScore[];
+};
+
+export type DnacHealthDevice = {
+  id?: string | null;
+  name: string;
+  deviceType?: string | null;
+  deviceFamily?: string | null;
+  deviceRole?: string | null;
+  model?: string | null;
+  managementIp?: string | null;
+  siteHierarchy?: string | null;
+  reachability?: string | null;
+  healthScore?: number | null;
+  issueCount?: number | null;
+  clientCount?: number | null;
+  softwareVersion?: string | null;
+  serialNumber?: string | null;
+  uptime?: string | null;
+};
+
+export type DnacDeviceDetail = {
+  name?: string | null;
+  deviceType?: string | null;
+  deviceFamily?: string | null;
+  model?: string | null;
+  managementIp?: string | null;
+  siteHierarchy?: string | null;
+  reachability?: string | null;
+  healthScore?: number | null;
+  clientCount?: number | null;
+  softwareVersion?: string | null;
+  serialNumber?: string | null;
+  uptime?: string | null;
+};
+
+export type DnacNetworkHealth = {
+  retrievedAt: number;
+  overallScore?: number | null;
+  totalDevices?: number | null;
+  monitoredDevices?: number | null;
+  healthyDevices?: number | null;
+  unhealthyDevices?: number | null;
+  fairDevices?: number | null;
+  poorDevices?: number | null;
+  unmonitoredDevices?: number | null;
+  categories: DnacHealthCategory[];
+  sites: DnacSiteHealth[];
+  clientHealth: DnacClientHealth[];
+  devices: DnacHealthDevice[];
+  deviceCount?: number | null;
+  devicesTruncated: boolean;
+  siteError?: string | null;
+  clientError?: string | null;
+  deviceError?: string | null;
+  inventoryError?: string | null;
+};
+
 export const defaultDnacSettings: DnacSettings = {
   serverUrl: "",
   username: "",
@@ -103,6 +188,16 @@ export async function testDnacConnection(settings: DnacSettings, password?: stri
 export async function searchDnacClient(settings: DnacSettings, macAddress: string): Promise<DnacClient> {
   nativeOnly();
   return invoke<DnacClient>("search_dnac_client", { request: request(settings), macAddress });
+}
+
+export async function getDnacNetworkHealth(settings: DnacSettings): Promise<DnacNetworkHealth> {
+  nativeOnly();
+  return invoke<DnacNetworkHealth>("get_dnac_network_health", { request: request(settings) });
+}
+
+export async function getDnacDeviceDetail(settings: DnacSettings, deviceId: string): Promise<DnacDeviceDetail> {
+  nativeOnly();
+  return invoke<DnacDeviceDetail>("get_dnac_device_detail", { request: request(settings), deviceId });
 }
 
 export function connectionStateLabel(state: DnacConnectionState) {

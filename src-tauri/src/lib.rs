@@ -609,6 +609,8 @@ pub fn run() {
             dnac::clear_dnac_connection,
             dnac::test_dnac_connection,
             dnac::search_dnac_client,
+            dnac::get_dnac_network_health,
+            dnac::get_dnac_device_detail,
             fetch_security_advisories,
             ask_ai,
             diagnostics::run_ping,

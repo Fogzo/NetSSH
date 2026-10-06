@@ -31,6 +31,7 @@ import { EngineerNotes } from "./EngineerNotes";
 import { DeviceDiscoveryModal } from "./DeviceDiscovery";
 import { WelcomeTour, type WelcomeTourResult } from "./WelcomeTour";
 import { ClientSearch } from "./ClientSearch";
+import { NetworkHealth } from "./NetworkHealth";
 import { DnacSettingsPanel } from "./DnacSettingsPanel";
 import { loadDnacSettings, saveDnacConnection, testDnacConnection, type DnacConnectionState, type DnacSettings } from "./dnac";
 import type { AiMessage, AiProvider, CommandSnippet, ConnectionHistory, ConnectionProtocol, CredentialProfile, DeviceRole, Host, Session, TerminalLine, View } from "./types";
@@ -43,6 +44,7 @@ const navItems: { id: View; label: string; icon: typeof TerminalSquare }[] = [
   { id: "inventory", label: "Inventory", icon: Server },
   { id: "topology", label: "Topology", icon: Network },
   { id: "client-search", label: "Client search", icon: Search },
+  { id: "network-health", label: "Network health", icon: Activity },
   { id: "toolbox", label: "Toolbox", icon: Wrench },
   { id: "snippets", label: "Snippets", icon: Code2 },
   { id: "notes", label: "Engineer notes", icon: FileText },
@@ -215,6 +217,7 @@ function App() {
   const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSection>("workspace");
   const [dnacSettings, setDnacSettings] = useState<DnacSettings>(loadDnacSettings);
   const [dnacConnectionState, setDnacConnectionState] = useState<DnacConnectionState>("not-configured");
+  const [toolboxAuditTargetId, setToolboxAuditTargetId] = useState<string | null>(null);
   const [sessionTransferOpen, setSessionTransferOpen] = useState(false);
   const [profileEditorOpen, setProfileEditorOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
@@ -720,7 +723,8 @@ function App() {
           {view === "inventory" && <Inventory hosts={deviceHosts} onConnect={connect} onAdd={() => setAddDeviceOpen(true)} onTransfer={() => setSessionTransferOpen(true)} onEdit={setEditingHost} onFavorite={(id) => setDeviceHosts((current) => current.map((host) => host.id === id ? { ...host, favorite: !host.favorite } : host))} onDelete={(id) => { setDeviceHosts((current) => current.filter((host) => host.id !== id)); deleteDevicePassword(id).catch(() => undefined); notify("Device removed"); }} />}
           {view === "topology" && <TopologyDesigner hosts={deviceHosts} onConnect={(host) => { setView("workspace"); void connect(host); }} notify={notify} />}
           {view === "client-search" && <ClientSearch settings={dnacSettings} connectionState={dnacConnectionState} onConnectionStateChange={setDnacConnectionState} onOpenSettings={() => { setSettingsInitialSection("dnac"); setSettingsOpen(true); }} />}
-          {view === "toolbox" && <Toolbox hosts={deviceHosts} credentialProfiles={credentialProfiles} notify={notify} />}
+          {view === "network-health" && <NetworkHealth settings={dnacSettings} connectionState={dnacConnectionState} onConnectionStateChange={setDnacConnectionState} onOpenSettings={() => { setSettingsInitialSection("dnac"); setSettingsOpen(true); }} switchHosts={deviceHosts} onOpenSwitchAudit={(host) => { setToolboxAuditTargetId(host.id); setView("toolbox"); }} />}
+          {view === "toolbox" && <Toolbox hosts={deviceHosts} credentialProfiles={credentialProfiles} notify={notify} initialAuditHostId={toolboxAuditTargetId} onInitialAuditTargetConsumed={() => setToolboxAuditTargetId(null)} />}
           {view === "snippets" && <Snippets notify={notify} onRun={(snippet) => {
             if (!activeSession) { notify("Open a device session before running a snippet"); setView("workspace"); return; }
             const target = sessions.find((session) => session.id === activeSession);
@@ -789,7 +793,7 @@ function Sidebar({ view, setView, open, setOpen, onSearch, onOpenSettings, onEdi
 }
 
 function Topbar({ view, onSearch, notifications, notificationsOpen, onToggleNotifications, onClearNotifications, onOpenSettings }: { view: View; onSearch: () => void; notifications: AppNotification[]; notificationsOpen: boolean; onToggleNotifications: () => void; onClearNotifications: () => void; onOpenSettings: () => void }) {
-  const titles: Record<View, string> = { workspace: "Workspace", inventory: "Device inventory", topology: "Network topology", "client-search": "Client search", toolbox: "Network toolbox", snippets: "Command snippets", notes: "Engineer notes", assistant: "AI assistant", favorites: "Favourite devices", history: "Connection history", credentials: "Credential vault" };
+  const titles: Record<View, string> = { workspace: "Workspace", inventory: "Device inventory", topology: "Network topology", "client-search": "Client search", "network-health": "Network health", toolbox: "Network toolbox", snippets: "Command snippets", notes: "Engineer notes", assistant: "AI assistant", favorites: "Favourite devices", history: "Connection history", credentials: "Credential vault" };
   const unread = notifications.filter((item) => !item.read).length;
   return <header className="topbar"><div><h1>{titles[view]}</h1><span className="breadcrumb">NetSSH <ChevronRight size={12} /> {titles[view]}</span></div><div className="top-actions"><button className="mini-search" onClick={onSearch}><Search size={15} /> Quick search</button><div className="top-popover-wrap"><button className={`icon-button ${notificationsOpen ? "active" : ""}`} aria-label="Notifications" onClick={onToggleNotifications}><Bell size={18} />{unread > 0 && <em className="notification-count">{unread}</em>}</button>{notificationsOpen && <NotificationCenter notifications={notifications} onClear={onClearNotifications} />}</div><button className="icon-button" aria-label="Settings" onClick={onOpenSettings}><Settings size={18} /></button></div></header>;
 }
@@ -1654,11 +1658,18 @@ function CredentialProfileModal({ profile, onClose, onSave }: { profile?: Creden
 
 type ToolboxTool = "subnet" | "ping" | "dns" | "port" | "wifi" | "audit";
 
-function Toolbox({ hosts, credentialProfiles, notify }: { hosts: Host[]; credentialProfiles: CredentialProfile[]; notify: (message: string) => void }) {
+function Toolbox({ hosts, credentialProfiles, notify, initialAuditHostId, onInitialAuditTargetConsumed }: { hosts: Host[]; credentialProfiles: CredentialProfile[]; notify: (message: string) => void; initialAuditHostId: string | null; onInitialAuditTargetConsumed: () => void }) {
   const [activeTool, setActiveTool] = useState<ToolboxTool>("subnet");
+  const [auditTargetHostId, setAuditTargetHostId] = useState<string | null>(null);
   const [cidr, setCidr] = useState("10.24.16.34/20");
   const [result, setResult] = useState<SubnetResult>(() => calculateSubnet(cidr));
   const [error, setError] = useState("");
+  useEffect(() => {
+    if (!initialAuditHostId) return;
+    setAuditTargetHostId(initialAuditHostId);
+    setActiveTool("audit");
+    onInitialAuditTargetConsumed();
+  }, [initialAuditHostId, onInitialAuditTargetConsumed]);
   const calculate = (event?: FormEvent) => {
     event?.preventDefault();
     try { setResult(calculateSubnet(cidr)); setError(""); } catch (caught) { setError((caught as Error).message); }
@@ -1680,12 +1691,12 @@ function Toolbox({ hosts, credentialProfiles, notify }: { hosts: Host[]; credent
     { id: "audit" as const, icon: ClipboardCheck, label: "Switch audit" },
   ];
   const toolDescription = (tool: ToolboxTool) => tool === "ping" ? "Reachability and hop path" : tool === "dns" ? "System resolver lookup" : tool === "port" ? "Timed TCP handshake" : tool === "wifi" ? "RSSI, channel and radio health" : tool === "audit" ? "Unused access-port evidence" : "Address planning";
-  return <div className="page"><div className="page-intro"><div><h2>Network toolbox</h2><p>Fast, reliable utilities built into your workflow.</p></div></div><div className="tool-tabs">{tools.map((tool) => <button key={tool.id} className={activeTool === tool.id ? "active" : ""} onClick={() => setActiveTool(tool.id)}><tool.icon size={16} /> {tool.label}</button>)}</div>{activeTool === "subnet" ? <div className="tool-grid"><section className="panel calculator-panel"><div className="panel-title"><div><h3>IPv4 subnet calculator</h3><p>Enter an IPv4 address, then adjust the prefix slider</p></div><span className="tool-icon"><Calculator size={20} /></span></div><form onSubmit={calculate} className="calculator-form"><label>IP address / CIDR</label><div><input value={cidr} onChange={(event) => setCidr(event.target.value)} placeholder="192.168.1.10/24" /><button className="primary-button">Calculate</button></div>{error && <span className="form-error">{error}</span>}<div className="subnet-prefix-control"><div><strong>Prefix length</strong><span>/{prefixValue} · {result.total.toLocaleString()} total addresses</span></div><input aria-label="Subnet prefix length" type="range" min="0" max="32" step="1" value={prefixValue} onChange={(event) => changePrefix(Number(event.target.value))} /><div className="subnet-prefix-scale"><span>/0</span><span>/8</span><span>/16</span><span>/24</span><span>/32</span></div></div></form><div className="result-grid"><Result label="Network" value={result.network} copy={copy} /><Result label="Broadcast" value={result.broadcast} copy={copy} /><Result label="Subnet mask" value={result.mask} copy={copy} /><Result label="Wildcard mask" value={result.wildcard} copy={copy} /><Result label="First usable" value={result.firstHost} copy={copy} /><Result label="Last usable" value={result.lastHost} copy={copy} /></div><div className="capacity-row"><div><span>Address space</span><strong>{result.cidr}</strong></div><div><span>Usable hosts</span><strong>{result.usable.toLocaleString()}</strong></div><div><span>Total addresses</span><strong>{result.total.toLocaleString()}</strong></div><div><span>Scope</span><strong>{result.isPrivate ? "Private" : "Public"}</strong></div></div></section><aside className="tool-aside"><section className="panel"><div className="panel-title"><div><h3>Binary view</h3><p>32-bit representation</p></div></div><div className="binary-value">{result.binary.split(".").map((part, index) => <span key={index}>{part}{index < 3 && <i>.</i>}</span>)}</div></section><section className="panel quick-tools"><div className="panel-title"><div><h3>Quick tools</h3><p>Common network checks</p></div></div>{tools.slice(1).map((tool) => <button key={tool.id} onClick={() => setActiveTool(tool.id)}><span><tool.icon size={17} /></span><div><strong>{tool.label}</strong><small>{toolDescription(tool.id)}</small></div><ChevronRight size={15} /></button>)}</section></aside></div> : activeTool === "wifi" ? <WifiPanel notify={notify} /> : activeTool === "audit" ? <LiveSwitchAuditPanel hosts={hosts} credentialProfiles={credentialProfiles} notify={notify} /> : <DiagnosticPanel tool={activeTool} notify={notify} />}</div>;
+  return <div className="page"><div className="page-intro"><div><h2>Network toolbox</h2><p>Fast, reliable utilities built into your workflow.</p></div></div><div className="tool-tabs">{tools.map((tool) => <button key={tool.id} className={activeTool === tool.id ? "active" : ""} onClick={() => setActiveTool(tool.id)}><tool.icon size={16} /> {tool.label}</button>)}</div>{activeTool === "subnet" ? <div className="tool-grid"><section className="panel calculator-panel"><div className="panel-title"><div><h3>IPv4 subnet calculator</h3><p>Enter an IPv4 address, then adjust the prefix slider</p></div><span className="tool-icon"><Calculator size={20} /></span></div><form onSubmit={calculate} className="calculator-form"><label>IP address / CIDR</label><div><input value={cidr} onChange={(event) => setCidr(event.target.value)} placeholder="192.168.1.10/24" /><button className="primary-button">Calculate</button></div>{error && <span className="form-error">{error}</span>}<div className="subnet-prefix-control"><div><strong>Prefix length</strong><span>/{prefixValue} · {result.total.toLocaleString()} total addresses</span></div><input aria-label="Subnet prefix length" type="range" min="0" max="32" step="1" value={prefixValue} onChange={(event) => changePrefix(Number(event.target.value))} /><div className="subnet-prefix-scale"><span>/0</span><span>/8</span><span>/16</span><span>/24</span><span>/32</span></div></div></form><div className="result-grid"><Result label="Network" value={result.network} copy={copy} /><Result label="Broadcast" value={result.broadcast} copy={copy} /><Result label="Subnet mask" value={result.mask} copy={copy} /><Result label="Wildcard mask" value={result.wildcard} copy={copy} /><Result label="First usable" value={result.firstHost} copy={copy} /><Result label="Last usable" value={result.lastHost} copy={copy} /></div><div className="capacity-row"><div><span>Address space</span><strong>{result.cidr}</strong></div><div><span>Usable hosts</span><strong>{result.usable.toLocaleString()}</strong></div><div><span>Total addresses</span><strong>{result.total.toLocaleString()}</strong></div><div><span>Scope</span><strong>{result.isPrivate ? "Private" : "Public"}</strong></div></div></section><aside className="tool-aside"><section className="panel"><div className="panel-title"><div><h3>Binary view</h3><p>32-bit representation</p></div></div><div className="binary-value">{result.binary.split(".").map((part, index) => <span key={index}>{part}{index < 3 && <i>.</i>}</span>)}</div></section><section className="panel quick-tools"><div className="panel-title"><div><h3>Quick tools</h3><p>Common network checks</p></div></div>{tools.slice(1).map((tool) => <button key={tool.id} onClick={() => setActiveTool(tool.id)}><span><tool.icon size={17} /></span><div><strong>{tool.label}</strong><small>{toolDescription(tool.id)}</small></div><ChevronRight size={15} /></button>)}</section></aside></div> : activeTool === "wifi" ? <WifiPanel notify={notify} /> : activeTool === "audit" ? <LiveSwitchAuditPanel hosts={hosts} credentialProfiles={credentialProfiles} notify={notify} initialHostId={auditTargetHostId} /> : <DiagnosticPanel tool={activeTool} notify={notify} />}</div>;
 }
 
-function LiveSwitchAuditPanel({ hosts, credentialProfiles, notify }: { hosts: Host[]; credentialProfiles: CredentialProfile[]; notify: (message: string) => void }) {
+function LiveSwitchAuditPanel({ hosts, credentialProfiles, notify, initialHostId }: { hosts: Host[]; credentialProfiles: CredentialProfile[]; notify: (message: string) => void; initialHostId?: string | null }) {
   const eligibleHosts = hosts.filter((host) => (host.protocol ?? "ssh") === "ssh" && !host.demoProfile);
-  const [deviceId, setDeviceId] = useState(eligibleHosts[0]?.id ?? "");
+  const [deviceId, setDeviceId] = useState(initialHostId && eligibleHosts.some((host) => host.id === initialHostId) ? initialHostId : eligibleHosts[0]?.id ?? "");
   const [minimumWeeks, setMinimumWeeks] = useState(10);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState("");
@@ -1693,6 +1704,12 @@ function LiveSwitchAuditPanel({ hosts, credentialProfiles, notify }: { hosts: Ho
   const [vaultPasswordAvailable, setVaultPasswordAvailable] = useState<boolean | null>(null);
   const [auditPassword, setAuditPassword] = useState("");
   const [saveAuditPassword, setSaveAuditPassword] = useState(true);
+  useEffect(() => {
+    if (!initialHostId || !eligibleHosts.some((host) => host.id === initialHostId)) return;
+    setDeviceId(initialHostId);
+    setAudit(null);
+    setError("");
+  }, [initialHostId, hosts]);
   const selectedHost = eligibleHosts.find((host) => host.id === deviceId);
   const selectedCredential = credentialProfiles.find((credential) => credential.id === selectedHost?.credentialId);
   const candidates = audit?.ports.filter((port) => port.candidate) ?? [];

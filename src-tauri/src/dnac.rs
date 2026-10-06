@@ -2,13 +2,20 @@ use keyring::Entry;
 use reqwest::{Client, StatusCode, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
-use std::time::{Duration, Instant};
+use std::collections::HashSet;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 const DNAC_KEYRING_SERVICE: &str = "app.netssh.client.dnac";
 const DNAC_KEYRING_ACCOUNT: &str = "connection";
 const AUTH_PATH: &str = "/dna/system/api/v1/auth/token";
 const CLIENT_DETAIL_PATH: &str = "/dna/intent/api/v1/client-detail";
+const NETWORK_HEALTH_PATH: &str = "/dna/intent/api/v1/network-health";
+const SITE_HEALTH_PATH: &str = "/dna/intent/api/v1/site-health";
+const CLIENT_HEALTH_PATH: &str = "/dna/intent/api/v1/client-health";
+const DEVICE_HEALTH_PATH: &str = "/dna/intent/api/v1/device-health";
+const NETWORK_DEVICE_PATH: &str = "/dna/intent/api/v1/network-device";
+const DEVICE_DETAIL_PATH: &str = "/dna/intent/api/v1/device-detail";
 const TOKEN_LIFETIME: Duration = Duration::from_secs(55 * 60);
 
 #[derive(Default)]
@@ -68,6 +75,118 @@ pub struct DnacClientResult {
     device_type: Option<String>,
     vendor: Option<String>,
     last_updated: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DnacNetworkHealthResult {
+    retrieved_at: i64,
+    overall_score: Option<f64>,
+    total_devices: Option<i64>,
+    monitored_devices: Option<i64>,
+    healthy_devices: Option<i64>,
+    unhealthy_devices: Option<i64>,
+    fair_devices: Option<i64>,
+    poor_devices: Option<i64>,
+    unmonitored_devices: Option<i64>,
+    categories: Vec<DnacHealthCategory>,
+    sites: Vec<DnacSiteHealth>,
+    client_health: Vec<DnacClientHealth>,
+    devices: Vec<DnacHealthDevice>,
+    device_count: Option<i64>,
+    devices_truncated: bool,
+    site_error: Option<String>,
+    client_error: Option<String>,
+    device_error: Option<String>,
+    inventory_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DnacHealthDevice {
+    id: Option<String>,
+    name: String,
+    device_type: Option<String>,
+    device_family: Option<String>,
+    device_role: Option<String>,
+    model: Option<String>,
+    management_ip: Option<String>,
+    site_hierarchy: Option<String>,
+    reachability: Option<String>,
+    health_score: Option<i64>,
+    issue_count: Option<i64>,
+    client_count: Option<i64>,
+    software_version: Option<String>,
+    serial_number: Option<String>,
+    uptime: Option<String>,
+}
+
+struct DnacHealthData {
+    network: Value,
+    sites: Value,
+    clients: Value,
+    devices: Value,
+    inventory: Value,
+    devices_truncated: bool,
+    site_error: Option<String>,
+    client_error: Option<String>,
+    device_error: Option<String>,
+    inventory_error: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DnacDeviceDetail {
+    name: Option<String>,
+    device_type: Option<String>,
+    device_family: Option<String>,
+    model: Option<String>,
+    management_ip: Option<String>,
+    site_hierarchy: Option<String>,
+    reachability: Option<String>,
+    health_score: Option<i64>,
+    client_count: Option<i64>,
+    software_version: Option<String>,
+    serial_number: Option<String>,
+    uptime: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DnacHealthCategory {
+    category: String,
+    total_count: Option<i64>,
+    health_score: Option<f64>,
+    good_count: Option<i64>,
+    fair_count: Option<i64>,
+    poor_count: Option<i64>,
+    no_health_count: Option<i64>,
+    unmonitored_count: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DnacSiteHealth {
+    site_name: String,
+    site_hierarchy: Option<String>,
+    network_health_average: Option<f64>,
+    device_count: Option<i64>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DnacClientHealth {
+    category: String,
+    client_count: Option<i64>,
+    health_score: Option<f64>,
+    scores: Vec<DnacClientHealthScore>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DnacClientHealthScore {
+    category: String,
+    client_count: Option<i64>,
 }
 
 fn password_entry() -> Result<Entry, String> {
@@ -306,6 +425,686 @@ pub async fn search_dnac_client(
     parse_client_detail(&body, &mac)
 }
 
+async fn health_api_request(
+    http: &Client,
+    server_url: &str,
+    token: &str,
+    path: &str,
+    query: &[(&str, &str)],
+) -> Result<(StatusCode, Value), String> {
+    let response = http
+        .get(format!("{server_url}{path}"))
+        .header("X-Auth-Token", token)
+        .header("Accept", "application/json")
+        .query(query)
+        .send()
+        .await
+        .map_err(|error| {
+            eprintln!("[DNAC] Catalyst Center endpoint {path} request failed: {error}");
+            request_error(error)
+        })?;
+    let status = response.status();
+    let text = response
+        .text()
+        .await
+        .map_err(|error| format!("Unable to read the Catalyst Center health response: {error}"))?;
+    let body = serde_json::from_str::<Value>(&text).unwrap_or_else(
+        |_| serde_json::json!({ "message": text.chars().take(300).collect::<String>() }),
+    );
+    Ok((status, body))
+}
+
+async fn health_api_snapshot(
+    http: &Client,
+    server_url: &str,
+    token: &str,
+) -> (
+    Result<(StatusCode, Value), String>,
+    Result<(StatusCode, Value), String>,
+    Result<(StatusCode, Value), String>,
+    Result<(StatusCode, Value), String>,
+    Result<(StatusCode, Value), String>,
+) {
+    tokio::join!(
+        health_api_request(http, server_url, token, NETWORK_HEALTH_PATH, &[]),
+        health_api_request(http, server_url, token, SITE_HEALTH_PATH, &[]),
+        health_api_request(http, server_url, token, CLIENT_HEALTH_PATH, &[]),
+        health_api_request(
+            http,
+            server_url,
+            token,
+            DEVICE_HEALTH_PATH,
+            &[("limit", "500"), ("offset", "1")],
+        ),
+        health_api_request(
+            http,
+            server_url,
+            token,
+            NETWORK_DEVICE_PATH,
+            &[("limit", "500"), ("offset", "1")],
+        ),
+    )
+}
+
+fn result_unauthorized(result: &Result<(StatusCode, Value), String>) -> bool {
+    matches!(result, Ok((StatusCode::UNAUTHORIZED, _)))
+}
+
+fn number_value(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|text| text.parse::<f64>().ok()))
+}
+
+fn object_number(object: &Map<String, Value>, keys: &[&str]) -> Option<f64> {
+    keys.iter()
+        .find_map(|key| object.get(*key).and_then(number_value))
+}
+
+fn object_integer(object: &Map<String, Value>, keys: &[&str]) -> Option<i64> {
+    object_number(object, keys).map(|number| number.round() as i64)
+}
+
+fn object_sum(object: &Map<String, Value>, key: &str) -> Option<i64> {
+    let value = object.get(key)?;
+    if let Some(number) = number_value(value) {
+        return Some(number.round() as i64);
+    }
+    let values = value.as_object()?;
+    let counts: Vec<i64> = values
+        .values()
+        .filter_map(number_value)
+        .map(|number| number.round() as i64)
+        .collect();
+    (!counts.is_empty()).then(|| counts.into_iter().sum())
+}
+
+fn first_response_object(body: &Value) -> Option<&Map<String, Value>> {
+    body.get("response")?
+        .as_array()?
+        .iter()
+        .find_map(Value::as_object)
+}
+
+fn body_number(body: &Value, keys: &[&str]) -> Option<f64> {
+    body.as_object()
+        .and_then(|object| object_number(object, keys))
+        .or_else(|| first_response_object(body).and_then(|object| object_number(object, keys)))
+}
+
+fn category_label(value: &Value) -> Option<String> {
+    value
+        .get("scoreCategory")
+        .and_then(|category| {
+            category
+                .get("value")
+                .or_else(|| category.get("scoreCategory"))
+                .or_else(|| category.as_str().map(|_| category))
+        })
+        .and_then(|label| match label {
+            Value::String(text) if !text.trim().is_empty() => Some(text.trim().to_owned()),
+            _ => None,
+        })
+        .or_else(|| {
+            value
+                .get("category")
+                .or_else(|| value.get("name"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|label| !label.is_empty())
+                .map(str::to_owned)
+        })
+}
+
+fn parse_health_categories(body: &Value) -> Vec<DnacHealthCategory> {
+    let distribution = body
+        .get("healthDistirubution")
+        .or_else(|| body.get("healthDistribution"))
+        .or_else(|| {
+            first_response_object(body).and_then(|object| {
+                object
+                    .get("healthDistirubution")
+                    .or_else(|| object.get("healthDistribution"))
+            })
+        })
+        .and_then(Value::as_array);
+    distribution
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .map(|object| DnacHealthCategory {
+            category: value_string(object, &["category", "entity"])
+                .unwrap_or_else(|| "Network".into()),
+            total_count: object_integer(object, &["totalCount", "totalDevices"]),
+            health_score: object_number(object, &["healthScore"]),
+            good_count: object_integer(object, &["goodCount"]),
+            fair_count: object_integer(object, &["fairCount"]),
+            poor_count: object_integer(object, &["badCount", "poorCount"]),
+            no_health_count: object_integer(object, &["noHealthCount"]),
+            unmonitored_count: object_integer(object, &["unmonCount", "unmonitoredCount"]),
+        })
+        .collect()
+}
+
+fn parse_site_health(body: &Value) -> Vec<DnacSiteHealth> {
+    body.get("response")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .map(|object| DnacSiteHealth {
+            site_name: value_string(object, &["siteName", "name"])
+                .unwrap_or_else(|| "Unnamed site".into()),
+            site_hierarchy: value_string(object, &["siteHierarchy", "sitePath"]),
+            network_health_average: object_number(object, &["networkHealthAverage", "healthScore"]),
+            device_count: object_integer(
+                object,
+                &["numberOfDevices", "deviceCount", "totalDeviceCount"],
+            ),
+        })
+        .collect()
+}
+
+fn parse_client_health(body: &Value) -> Vec<DnacClientHealth> {
+    let rows = body
+        .get("response")
+        .and_then(Value::as_array)
+        .and_then(|response| response.iter().find_map(Value::as_object))
+        .and_then(|object| object.get("scoreDetail"))
+        .and_then(Value::as_array);
+    rows.into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .map(|object| {
+            let scores = object
+                .get("scoreList")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|score| {
+                    let category = category_label(score)?;
+                    let score_object = score.as_object()?;
+                    Some(DnacClientHealthScore {
+                        category,
+                        client_count: object_integer(score_object, &["clientCount"]),
+                    })
+                })
+                .collect();
+            DnacClientHealth {
+                category: category_label(&Value::Object(object.clone()))
+                    .unwrap_or_else(|| "Clients".into()),
+                client_count: object_integer(object, &["clientCount"]),
+                health_score: object_number(object, &["scoreValue"]),
+                scores,
+            }
+        })
+        .collect()
+}
+
+fn parse_health_devices(body: &Value, inventory: &Value) -> Vec<DnacHealthDevice> {
+    let inventory_rows: Vec<&Map<String, Value>> = inventory
+        .get("response")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+        .collect();
+    let mut known_ids = HashSet::new();
+    let mut known_ips = HashSet::new();
+    let mut devices = Vec::new();
+    for health in body
+        .get("response")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_object)
+    {
+        let health_id = value_string(health, &["uuid", "id"]);
+        let management_ip = value_string(
+            health,
+            &[
+                "ipAddress",
+                "managementIpAddress",
+                "managementIpAddr",
+                "ipV4Addr",
+            ],
+        );
+        let inventory_device = inventory_rows.iter().copied().find(|device| {
+            health_id.as_deref().is_some_and(|id| {
+                value_string(device, &["id", "instanceUuid", "uuid"]).as_deref() == Some(id)
+            }) || management_ip.as_deref().is_some_and(|ip| {
+                value_string(
+                    device,
+                    &["managementIpAddress", "managementAddress", "ipv4Address"],
+                )
+                .is_some_and(|value| value.eq_ignore_ascii_case(ip))
+            })
+        });
+        let inventory_value =
+            |keys: &[&str]| inventory_device.and_then(|device| value_string(device, keys));
+        if let Some(id) = health_id.as_ref() {
+            known_ids.insert(id.to_ascii_lowercase());
+        }
+        if let Some(ip) = management_ip.as_ref() {
+            known_ips.insert(ip.to_ascii_lowercase());
+        }
+        if let Some(device) = inventory_device {
+            if let Some(id) = value_string(device, &["id", "instanceUuid", "uuid"]) {
+                known_ids.insert(id.to_ascii_lowercase());
+            }
+            if let Some(ip) = value_string(
+                device,
+                &["managementIpAddress", "managementAddress", "ipv4Address"],
+            ) {
+                known_ips.insert(ip.to_ascii_lowercase());
+            }
+        }
+        devices.push(DnacHealthDevice {
+            id: health_id.or_else(|| inventory_value(&["id", "instanceUuid", "uuid"])),
+            name: value_string(health, &["name", "hostname"])
+                .or_else(|| inventory_value(&["hostname", "name"]))
+                .or_else(|| management_ip.clone())
+                .unwrap_or_else(|| "Unnamed device".into()),
+            device_type: value_string(health, &["deviceType", "type"])
+                .or_else(|| inventory_value(&["deviceType", "type"])),
+            device_family: value_string(health, &["deviceFamily", "family"])
+                .or_else(|| inventory_value(&["deviceFamily", "family"])),
+            device_role: value_string(health, &["deviceRole", "nwDeviceRole", "role"])
+                .or_else(|| inventory_value(&["deviceRole", "nwDeviceRole", "role"])),
+            model: value_string(health, &["model", "deviceSeries"]).or_else(|| {
+                inventory_value(&[
+                    "series",
+                    "deviceSeries",
+                    "model",
+                    "platformId",
+                    "platformIds",
+                ])
+            }),
+            management_ip: management_ip.or_else(|| {
+                inventory_value(&[
+                    "managementIpAddress",
+                    "managementAddress",
+                    "dnsResolvedManagementIpAddress",
+                    "ipv4Address",
+                ])
+            }),
+            site_hierarchy: value_string(health, &["siteHierarchy", "location"])
+                .or_else(|| inventory_value(&["siteHierarchy", "locationName"])),
+            reachability: value_string(health, &["reachabilityHealth", "reachabilityStatus"])
+                .or_else(|| value_string(health, &["communicationState"]))
+                .or_else(|| inventory_value(&["reachabilityStatus", "communicationState"])),
+            health_score: object_integer(health, &["overallHealth", "healthScore"]),
+            issue_count: object_integer(health, &["issueCount"]),
+            client_count: object_sum(health, "clientCount"),
+            software_version: value_string(health, &["osVersion", "softwareVersion"])
+                .or_else(|| inventory_value(&["softwareVersion", "osVersion"])),
+            serial_number: inventory_value(&["serialNumber", "serialNumbers"]),
+            uptime: value_string(health, &["upTime", "uptime"])
+                .or_else(|| inventory_value(&["upTime", "uptime"])),
+        });
+    }
+
+    for device in inventory_rows {
+        let id = value_string(device, &["id", "instanceUuid", "uuid"]);
+        let management_ip = value_string(
+            device,
+            &[
+                "managementIpAddress",
+                "managementAddress",
+                "dnsResolvedManagementIpAddress",
+                "ipv4Address",
+            ],
+        );
+        if id
+            .as_ref()
+            .is_some_and(|value| known_ids.contains(&value.to_ascii_lowercase()))
+            || management_ip
+                .as_ref()
+                .is_some_and(|value| known_ips.contains(&value.to_ascii_lowercase()))
+        {
+            continue;
+        }
+        if let Some(value) = id.as_ref() {
+            known_ids.insert(value.to_ascii_lowercase());
+        }
+        if let Some(value) = management_ip.as_ref() {
+            known_ips.insert(value.to_ascii_lowercase());
+        }
+        devices.push(DnacHealthDevice {
+            id,
+            name: value_string(device, &["hostname", "name"])
+                .or_else(|| management_ip.clone())
+                .unwrap_or_else(|| "Unnamed device".into()),
+            device_type: value_string(device, &["deviceType", "type"]),
+            device_family: value_string(device, &["deviceFamily", "family"]),
+            device_role: value_string(device, &["deviceRole", "nwDeviceRole", "role"]),
+            model: value_string(
+                device,
+                &[
+                    "platformId",
+                    "platformIds",
+                    "series",
+                    "deviceSeries",
+                    "model",
+                ],
+            ),
+            management_ip,
+            site_hierarchy: value_string(device, &["siteHierarchy", "locationName"]),
+            reachability: value_string(device, &["reachabilityStatus", "communicationState"]),
+            health_score: None,
+            issue_count: None,
+            client_count: None,
+            software_version: value_string(device, &["softwareVersion", "osVersion"]),
+            serial_number: value_string(device, &["serialNumber", "serialNumbers"]),
+            uptime: value_string(device, &["upTime", "uptime"]),
+        });
+    }
+    devices
+}
+
+fn parse_network_health(data: DnacHealthData) -> Result<DnacNetworkHealthResult, String> {
+    let DnacHealthData {
+        network,
+        sites,
+        clients,
+        devices,
+        inventory,
+        devices_truncated,
+        site_error,
+        client_error,
+        device_error,
+        inventory_error,
+    } = data;
+    let categories = parse_health_categories(&network);
+    let overall_score =
+        body_number(&network, &["latestHealthScore", "healthScore"]).or_else(|| {
+            categories
+                .first()
+                .and_then(|category| category.health_score)
+        });
+    if overall_score.is_none() && categories.is_empty() {
+        return Err("Catalyst Center returned no network health summary. Check that Network Health is enabled and your account has access.".into());
+    }
+    let fair_devices = body_number(&network, &["monitoredFairHealthDevices", "fairCount"])
+        .map(|number| number.round() as i64);
+    let poor_devices = body_number(
+        &network,
+        &["monitoredPoorHealthDevices", "badCount", "poorCount"],
+    )
+    .map(|number| number.round() as i64);
+    let healthy_devices = body_number(&network, &["monitoredHealthyDevices", "goodCount"])
+        .map(|number| number.round() as i64);
+    let unhealthy_devices = body_number(&network, &["monitoredUnHealthyDevices"])
+        .map(|number| number.round() as i64)
+        .or_else(|| Some(fair_devices.unwrap_or_default() + poor_devices.unwrap_or_default()));
+    Ok(DnacNetworkHealthResult {
+        retrieved_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64,
+        overall_score,
+        total_devices: body_number(&network, &["totalDevices", "totalCount"])
+            .map(|number| number.round() as i64),
+        monitored_devices: body_number(&network, &["monitoredDevices"])
+            .map(|number| number.round() as i64),
+        healthy_devices,
+        unhealthy_devices,
+        fair_devices,
+        poor_devices,
+        unmonitored_devices: body_number(&network, &["unMonitoredDevices", "noHealthDevices"])
+            .map(|number| number.round() as i64),
+        categories,
+        sites: parse_site_health(&sites),
+        client_health: parse_client_health(&clients),
+        devices: parse_health_devices(&devices, &inventory),
+        device_count: body_number(&inventory, &["totalCount"])
+            .or_else(|| body_number(&devices, &["totalCount"]))
+            .or_else(|| network.get("totalDevices").and_then(number_value))
+            .map(|number| number.round() as i64),
+        devices_truncated,
+        site_error,
+        client_error,
+        device_error,
+        inventory_error,
+    })
+}
+
+fn optional_health_body(
+    result: Result<(StatusCode, Value), String>,
+    label: &str,
+) -> (Value, Option<String>) {
+    match result {
+        Ok((status, body)) if status.is_success() => (body, None),
+        Ok((status, body)) => {
+            let error = status_error(status, &body, label);
+            eprintln!("[DNAC] {label} unavailable: {error}");
+            (Value::Null, Some(error))
+        }
+        Err(error) => {
+            eprintln!("[DNAC] {label} request failed: {error}");
+            (Value::Null, Some(error))
+        }
+    }
+}
+
+async fn fetch_paged_health_body(
+    http: &Client,
+    server_url: &str,
+    token: &str,
+    path: &str,
+    initial: Result<(StatusCode, Value), String>,
+    context: &str,
+) -> Result<(Value, bool), String> {
+    let (status, mut body) = initial?;
+    if !status.is_success() {
+        return Err(status_error(status, &body, context));
+    }
+    let mut rows = body
+        .get("response")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let reported_total = body
+        .get("totalCount")
+        .and_then(Value::as_u64)
+        .map(|value| value as usize);
+    let total = reported_total.unwrap_or(usize::MAX);
+    let mut offset = 501usize;
+    let mut page_count = 0;
+    let mut may_have_more = reported_total.map_or(rows.len() == 500, |count| rows.len() < count);
+    while may_have_more && rows.len() < total && page_count < 10 {
+        let offset_value = offset.to_string();
+        let query = [("limit", "500"), ("offset", offset_value.as_str())];
+        let (page_status, page_body) =
+            health_api_request(http, server_url, token, path, &query).await?;
+        if !page_status.is_success() {
+            return Err(status_error(page_status, &page_body, context));
+        }
+        let page_rows = page_body
+            .get("response")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if page_rows.is_empty() {
+            may_have_more = false;
+            break;
+        }
+        let full_page = page_rows.len() == 500;
+        rows.extend(page_rows);
+        offset += 500;
+        page_count += 1;
+        may_have_more = full_page && rows.len() < total;
+    }
+    let truncated = reported_total.is_some_and(|count| rows.len() < count) || may_have_more;
+    body["response"] = Value::Array(rows);
+    Ok((body, truncated))
+}
+
+#[tauri::command]
+pub async fn get_dnac_network_health(
+    request: DnacConnectionRequest,
+    state: tauri::State<'_, DnacState>,
+) -> Result<DnacNetworkHealthResult, String> {
+    eprintln!("[DNAC] Loading Catalyst Center Network Health snapshot");
+    let (mut http, mut server, mut token) = authenticate(&request, &state, false).await?;
+    let (mut network, mut sites, mut clients, mut devices, mut inventory) =
+        health_api_snapshot(&http, &server, &token).await;
+    if result_unauthorized(&network)
+        || result_unauthorized(&sites)
+        || result_unauthorized(&clients)
+        || result_unauthorized(&devices)
+        || result_unauthorized(&inventory)
+    {
+        *state.token.lock().await = None;
+        (http, server, token) = authenticate(&request, &state, true).await?;
+        (network, sites, clients, devices, inventory) =
+            health_api_snapshot(&http, &server, &token).await;
+    }
+
+    let (network_status, network_body) = network?;
+    if !network_status.is_success() {
+        return Err(status_error(
+            network_status,
+            &network_body,
+            "Network health",
+        ));
+    }
+    let (site_body, site_error) = optional_health_body(sites, "Site health");
+    let (client_body, client_error) = optional_health_body(clients, "Client health");
+    let (device_body, devices_truncated, device_error) = match fetch_paged_health_body(
+        &http,
+        &server,
+        &token,
+        DEVICE_HEALTH_PATH,
+        devices,
+        "Device health",
+    )
+    .await
+    {
+        Ok((body, truncated)) => (body, truncated, None),
+        Err(error) => {
+            eprintln!("[DNAC] Device health unavailable: {error}");
+            (Value::Null, false, Some(error))
+        }
+    };
+    let (inventory_body, inventory_truncated, inventory_error) = match fetch_paged_health_body(
+        &http,
+        &server,
+        &token,
+        NETWORK_DEVICE_PATH,
+        inventory,
+        "Device inventory",
+    )
+    .await
+    {
+        Ok((body, truncated)) => (body, truncated, None),
+        Err(error) => {
+            eprintln!("[DNAC] Device inventory unavailable: {error}");
+            (Value::Null, false, Some(error))
+        }
+    };
+    let result = parse_network_health(DnacHealthData {
+        network: network_body,
+        sites: site_body,
+        clients: client_body,
+        devices: device_body,
+        inventory: inventory_body,
+        devices_truncated: devices_truncated || inventory_truncated,
+        site_error,
+        client_error,
+        device_error,
+        inventory_error,
+    });
+    match &result {
+        Ok(snapshot) => eprintln!(
+            "[DNAC] Network Health loaded: {} devices, {} site records, {} client groups",
+            snapshot.devices.len(),
+            snapshot.sites.len(),
+            snapshot.client_health.len()
+        ),
+        Err(error) => eprintln!("[DNAC] Network Health snapshot failed: {error}"),
+    }
+    result
+}
+
+fn parse_device_detail(body: &Value) -> Result<DnacDeviceDetail, String> {
+    let detail = body
+        .get("response")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "Catalyst Center did not return details for this device".to_string())?;
+    Ok(DnacDeviceDetail {
+        name: value_string(detail, &["nwDeviceName", "name", "hostname"]),
+        device_type: value_string(detail, &["nwDeviceType", "deviceType", "type"]),
+        device_family: value_string(detail, &["nwDeviceFamily", "deviceFamily", "family"]),
+        model: value_string(detail, &["deviceSeries", "model", "platformId"]),
+        management_ip: value_string(
+            detail,
+            &[
+                "managementIpAddr",
+                "ip_addr_managementIpAddr",
+                "managementIpAddress",
+            ],
+        ),
+        site_hierarchy: value_string(detail, &["siteHierarchy", "locationName"]),
+        reachability: value_string(
+            detail,
+            &[
+                "reachabilityHealth",
+                "reachabilityStatus",
+                "communicationState",
+            ],
+        ),
+        health_score: object_integer(detail, &["overallHealth", "healthScore"]),
+        client_count: object_sum(detail, "clientCount"),
+        software_version: value_string(detail, &["softwareVersion", "osVersion"]),
+        serial_number: value_string(detail, &["serialNumber"]),
+        uptime: value_string(detail, &["upTime", "uptime"]),
+    })
+}
+
+#[tauri::command]
+pub async fn get_dnac_device_detail(
+    request: DnacConnectionRequest,
+    device_id: String,
+    state: tauri::State<'_, DnacState>,
+) -> Result<DnacDeviceDetail, String> {
+    if device_id.trim().is_empty() {
+        return Err("Catalyst Center did not provide an ID for this device".into());
+    }
+    let (mut http, mut server, mut token) = authenticate(&request, &state, false).await?;
+    let mut response = http
+        .get(format!("{server}{DEVICE_DETAIL_PATH}"))
+        .header("X-Auth-Token", &token)
+        .header("Accept", "application/json")
+        .query(&[("identifier", "uuid"), ("searchBy", device_id.as_str())])
+        .send()
+        .await
+        .map_err(request_error)?;
+    if response.status() == StatusCode::UNAUTHORIZED {
+        *state.token.lock().await = None;
+        (http, server, token) = authenticate(&request, &state, true).await?;
+        response = http
+            .get(format!("{server}{DEVICE_DETAIL_PATH}"))
+            .header("X-Auth-Token", &token)
+            .header("Accept", "application/json")
+            .query(&[("identifier", "uuid"), ("searchBy", device_id.as_str())])
+            .send()
+            .await
+            .map_err(request_error)?;
+    }
+    let status = response.status();
+    let text = response.text().await.map_err(|error| {
+        format!("Unable to read the Catalyst Center device detail response: {error}")
+    })?;
+    let body = serde_json::from_str::<Value>(&text).unwrap_or_else(
+        |_| serde_json::json!({ "message": text.chars().take(300).collect::<String>() }),
+    );
+    if !status.is_success() {
+        return Err(status_error(status, &body, "Device details"));
+    }
+    parse_device_detail(&body)
+}
+
 fn normalize_mac(value: &str) -> Result<String, String> {
     let compact: String = value
         .chars()
@@ -326,13 +1125,17 @@ fn normalize_mac(value: &str) -> Result<String, String> {
 }
 
 fn value_string(object: &Map<String, Value>, keys: &[&str]) -> Option<String> {
-    keys.iter()
-        .find_map(|key| object.get(*key))
-        .and_then(|value| match value {
+    keys.iter().find_map(|key| {
+        object.get(*key).and_then(|value| match value {
             Value::String(text) if !text.trim().is_empty() => Some(text.trim().to_owned()),
             Value::Number(number) => Some(number.to_string()),
+            Value::Array(values) => values.iter().find_map(|item| match item {
+                Value::String(text) if !text.trim().is_empty() => Some(text.trim().to_owned()),
+                _ => None,
+            }),
             _ => None,
         })
+    })
 }
 
 fn find_interface(topology: Option<&Value>, mac: &str) -> Option<String> {
@@ -552,5 +1355,144 @@ mod tests {
         assert_eq!(client.ssid.as_deref(), Some("Corporate"));
         assert_eq!(client.connected_device.as_deref(), Some("DER-AP-17"));
         assert_eq!(client.channel.as_deref(), Some("44"));
+    }
+
+    #[test]
+    fn parses_network_site_and_client_health_summaries() {
+        let network = json!({
+            "latestHealthScore": 92,
+            "totalDevices": 20,
+            "monitoredDevices": 18,
+            "monitoredHealthyDevices": 15,
+            "monitoredUnHealthyDevices": 3,
+            "monitoredFairHealthDevices": 2,
+            "monitoredPoorHealthDevices": 1,
+            "unMonitoredDevices": 2,
+            "healthDistirubution": [{
+                "category": "Access",
+                "totalCount": 12,
+                "healthScore": 90,
+                "goodCount": 10,
+                "fairCount": 1,
+                "badCount": 1,
+                "unmonCount": 0
+            }]
+        });
+        let sites = json!({
+            "response": [{
+                "siteName": "Derby",
+                "siteHierarchy": "Global/UK/Derby",
+                "networkHealthAverage": 88.5,
+                "numberOfDevices": 12
+            }]
+        });
+        let clients = json!({
+            "response": [{
+                "scoreDetail": [{
+                    "scoreCategory": {"value": "Wireless"},
+                    "scoreValue": 96,
+                    "clientCount": 42,
+                    "scoreList": [
+                        {"scoreCategory": {"value": "Good"}, "clientCount": 39},
+                        {"scoreCategory": {"value": "Poor"}, "clientCount": 3}
+                    ]
+                }]
+            }]
+        });
+        let devices = json!({
+            "totalCount": 1,
+            "response": [{
+                "uuid": "device-1",
+                "name": "DER-ACC-01",
+                "deviceType": "Cisco Catalyst Switch",
+                "deviceFamily": "Switches and Hubs",
+                "model": "C9300-48P",
+                "ipAddress": "10.24.0.1",
+                "location": "Global/UK/Derby/Floor 3",
+                "reachabilityHealth": "Reachable",
+                "overallHealth": 6,
+                "issueCount": 2,
+                "clientCount": {"radio0": 3, "radio1": 2},
+                "osVersion": "17.12.4"
+            }]
+        });
+        let inventory = json!({
+            "response": [{
+                "id": "device-1",
+                "managementIpAddress": "10.24.0.1",
+                "serialNumber": "FOC1234ABCD",
+                "upTime": "12 days"
+            }, {
+                "id": "device-2",
+                "hostname": "DER-AP-02",
+                "managementIpAddress": "10.24.0.2",
+                "deviceType": "Cisco Access Point",
+                "siteHierarchy": "Global/UK/Derby/Floor 3",
+                "reachabilityStatus": "Reachable"
+            }]
+        });
+
+        let parsed = parse_network_health(DnacHealthData {
+            network,
+            sites,
+            clients,
+            devices,
+            inventory,
+            devices_truncated: false,
+            site_error: None,
+            client_error: None,
+            device_error: None,
+            inventory_error: None,
+        })
+        .unwrap();
+        assert_eq!(parsed.overall_score, Some(92.0));
+        assert_eq!(parsed.total_devices, Some(20));
+        assert_eq!(parsed.healthy_devices, Some(15));
+        assert_eq!(parsed.categories[0].category, "Access");
+        assert_eq!(parsed.categories[0].poor_count, Some(1));
+        assert_eq!(parsed.sites[0].site_name, "Derby");
+        assert_eq!(parsed.sites[0].network_health_average, Some(88.5));
+        assert_eq!(parsed.client_health[0].category, "Wireless");
+        assert_eq!(parsed.client_health[0].scores[1].category, "Poor");
+        assert_eq!(parsed.client_health[0].scores[1].client_count, Some(3));
+        assert_eq!(parsed.devices[0].name, "DER-ACC-01");
+        assert_eq!(parsed.devices[0].health_score, Some(6));
+        assert_eq!(parsed.devices[0].client_count, Some(5));
+        assert_eq!(
+            parsed.devices[0].serial_number.as_deref(),
+            Some("FOC1234ABCD")
+        );
+        assert_eq!(
+            parsed.devices[0].site_hierarchy.as_deref(),
+            Some("Global/UK/Derby/Floor 3")
+        );
+        assert_eq!(parsed.devices.len(), 2);
+        assert_eq!(parsed.devices[1].name, "DER-AP-02");
+        assert_eq!(parsed.devices[1].health_score, None);
+        assert_eq!(parsed.devices[1].reachability.as_deref(), Some("Reachable"));
+    }
+
+    #[test]
+    fn parses_available_device_detail_fields() {
+        let detail = json!({
+            "response": {
+                "nwDeviceName": "DER-ACC-01",
+                "nwDeviceType": "Switches and Hubs",
+                "nwDeviceFamily": "Switches and Hubs",
+                "deviceSeries": "C9300-48P",
+                "managementIpAddr": "10.24.0.1",
+                "serialNumber": "FOC1234ABCD",
+                "softwareVersion": "17.12.4",
+                "upTime": "12 days",
+                "overallHealth": 6,
+                "clientCount": 8
+            }
+        });
+        let parsed = parse_device_detail(&detail).unwrap();
+        assert_eq!(parsed.name.as_deref(), Some("DER-ACC-01"));
+        assert_eq!(parsed.model.as_deref(), Some("C9300-48P"));
+        assert_eq!(parsed.serial_number.as_deref(), Some("FOC1234ABCD"));
+        assert_eq!(parsed.health_score, Some(6));
+        assert_eq!(parsed.client_count, Some(8));
     }
 }
