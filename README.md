@@ -14,6 +14,7 @@ NetSSH is a modern, network-engineer-first SSH workspace for Windows and macOS, 
 - Locally stored, searchable, editable command snippets with Cisco IOS/IOS-XE and NX-OS defaults
 - Network-focused AI copilot with OpenAI, Gemini, and offline demo modes
 - Reusable named login profiles with passwords stored in the native OS credential vault
+- Cisco Catalyst Center (DNAC) connection settings and read-only MAC client search
 - Global command palette (`Cmd/Ctrl + K`)
 - Responsive UI designed to adapt to future tablet and mobile layouts
 - Persistent light, dark, and operating-system appearance modes
@@ -26,6 +27,8 @@ To test a switch, add or edit the device in **Inventory**, select SSH, Telnet, o
 Windows release builds run as normal GUI applications without a separate Command Prompt window. Windows Wi-Fi diagnostics use the language-independent Native Wi-Fi API rather than parsing `netsh`. Current Windows 11 releases may require **Location services** and **Let desktop apps access your location** before SSID, BSSID, and signal details are available; NetSSH shows a direct settings shortcut when access is denied.
 
 Saved credentials are optional. Create labelled profiles such as **Network Admin**, **Read only**, or **Lab TACACS** in **Credentials**, then assign one profile to multiple devices from the vault or device editor. Each profile supports a login password and a separate optional enable password. Passwords remain in the operating-system vault while devices store only the profile ID. From an active session menu, **Send enable password** writes the enable secret directly to the terminal only when the engineer requests it. Telnet and Serial can still present their normal login prompts. SSH requires a username before opening a shell, so unassigned devices use a one-time connection dialog. A blank password attempts passwordless authentication.
+
+Configure Cisco Catalyst Center under **Settings → Cisco DNAC**, then use **Client search** to look up a MAC address. The first increment reports the client identity, IP and MAC addresses, health, wired or wireless type, location hierarchy, and the connected switch/interface or access point when Catalyst Center supplies those fields. The password is stored only in Windows Credential Manager or the native OS vault; API tokens remain in process memory. TLS certificate verification is enabled by default. Cisco Spaces is intentionally not used by this workflow.
 
 Use **Inventory → Import / export** to back up NetSSH connection profiles or migrate sessions from CSV, a PuTTY `.reg` export, a MobaXterm exported sessions file, or `MobaXterm.ini`. Imports create reusable username profiles where possible, but passwords, enable secrets, private keys, macros, proxy commands, and host-key trust are deliberately excluded.
 

@@ -30,6 +30,9 @@ import { findCiscoCommandSuggestions, type CiscoCommandSuggestion } from "./cisc
 import { EngineerNotes } from "./EngineerNotes";
 import { DeviceDiscoveryModal } from "./DeviceDiscovery";
 import { WelcomeTour, type WelcomeTourResult } from "./WelcomeTour";
+import { ClientSearch } from "./ClientSearch";
+import { DnacSettingsPanel } from "./DnacSettingsPanel";
+import { loadDnacSettings, saveDnacConnection, testDnacConnection, type DnacConnectionState, type DnacSettings } from "./dnac";
 import type { AiMessage, AiProvider, CommandSnippet, ConnectionHistory, ConnectionProtocol, CredentialProfile, DeviceRole, Host, Session, TerminalLine, View } from "./types";
 import packageMetadata from "../package.json";
 
@@ -39,6 +42,7 @@ const navItems: { id: View; label: string; icon: typeof TerminalSquare }[] = [
   { id: "workspace", label: "Workspace", icon: TerminalSquare },
   { id: "inventory", label: "Inventory", icon: Server },
   { id: "topology", label: "Topology", icon: Network },
+  { id: "client-search", label: "Client search", icon: Search },
   { id: "toolbox", label: "Toolbox", icon: Wrench },
   { id: "snippets", label: "Snippets", icon: Code2 },
   { id: "notes", label: "Engineer notes", icon: FileText },
@@ -208,6 +212,9 @@ function App() {
   const [deviceDiscoveryOpen, setDeviceDiscoveryOpen] = useState(false);
   const [editingHost, setEditingHost] = useState<Host | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [settingsInitialSection, setSettingsInitialSection] = useState<SettingsSection>("workspace");
+  const [dnacSettings, setDnacSettings] = useState<DnacSettings>(loadDnacSettings);
+  const [dnacConnectionState, setDnacConnectionState] = useState<DnacConnectionState>("not-configured");
   const [sessionTransferOpen, setSessionTransferOpen] = useState(false);
   const [profileEditorOpen, setProfileEditorOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
@@ -297,6 +304,21 @@ function App() {
   useEffect(() => {
     localStorage.setItem("netssh.userProfile", JSON.stringify(userProfile));
   }, [userProfile]);
+
+  useEffect(() => {
+    if (!isNativeApp() || !dnacSettings.rememberConnection || !dnacSettings.serverUrl || !dnacSettings.username) return;
+    let disposed = false;
+    const timer = window.setTimeout(() => {
+      if (disposed) return;
+      setDnacConnectionState("connecting");
+      testDnacConnection(dnacSettings).then(() => {
+        if (!disposed) setDnacConnectionState("connected");
+      }).catch(() => {
+        if (!disposed) setDnacConnectionState("error");
+      });
+    }, 700);
+    return () => { disposed = true; window.clearTimeout(timer); };
+  }, [dnacSettings]);
 
   useEffect(() => {
     let disposed = false;
@@ -687,9 +709,9 @@ function App() {
 
   return (
     <div className={`app-shell ${lightMode ? "theme-light" : "theme-dark"} ${preferences.compactWorkspace ? "compact-workspace" : ""}`}>
-      <Sidebar view={view} setView={setView} open={sidebarOpen} setOpen={setSidebarOpen} onSearch={() => setSearchOpen(true)} onOpenSettings={() => setSettingsOpen(true)} onEditProfile={() => setProfileEditorOpen(true)} onShowOnboarding={() => setOnboardingOpen(true)} userProfile={userProfile} notify={notify} deviceCount={deviceHosts.length} updateAvailable={availableUpdate} />
+      <Sidebar view={view} setView={setView} open={sidebarOpen} setOpen={setSidebarOpen} onSearch={() => setSearchOpen(true)} onOpenSettings={() => { setSettingsInitialSection("workspace"); setSettingsOpen(true); }} onEditProfile={() => setProfileEditorOpen(true)} onShowOnboarding={() => setOnboardingOpen(true)} userProfile={userProfile} notify={notify} deviceCount={deviceHosts.length} updateAvailable={availableUpdate} />
       <main className={`main ${sidebarOpen ? "" : "main-expanded"}`}>
-        <Topbar view={view} onSearch={() => setSearchOpen(true)} notifications={notifications} notificationsOpen={notificationsOpen} onToggleNotifications={() => { setNotificationsOpen((open) => !open); setSettingsOpen(false); setNotifications((current) => current.map((item) => ({ ...item, read: true }))); }} onClearNotifications={() => setNotifications([])} onOpenSettings={() => { setSettingsOpen(true); setNotificationsOpen(false); }} />
+        <Topbar view={view} onSearch={() => setSearchOpen(true)} notifications={notifications} notificationsOpen={notificationsOpen} onToggleNotifications={() => { setNotificationsOpen((open) => !open); setSettingsOpen(false); setNotifications((current) => current.map((item) => ({ ...item, read: true }))); }} onClearNotifications={() => setNotifications([])} onOpenSettings={() => { setSettingsInitialSection("workspace"); setSettingsOpen(true); setNotificationsOpen(false); }} />
         <div className="content">
           {view === "inventory" && <div className="inventory-discovery-launcher"><button className="secondary-button" onClick={() => setDeviceDiscoveryOpen(true)}><Network size={15} /> Discover device range</button></div>}
           {view === "workspace" && (
@@ -697,6 +719,7 @@ function App() {
           )}
           {view === "inventory" && <Inventory hosts={deviceHosts} onConnect={connect} onAdd={() => setAddDeviceOpen(true)} onTransfer={() => setSessionTransferOpen(true)} onEdit={setEditingHost} onFavorite={(id) => setDeviceHosts((current) => current.map((host) => host.id === id ? { ...host, favorite: !host.favorite } : host))} onDelete={(id) => { setDeviceHosts((current) => current.filter((host) => host.id !== id)); deleteDevicePassword(id).catch(() => undefined); notify("Device removed"); }} />}
           {view === "topology" && <TopologyDesigner hosts={deviceHosts} onConnect={(host) => { setView("workspace"); void connect(host); }} notify={notify} />}
+          {view === "client-search" && <ClientSearch settings={dnacSettings} connectionState={dnacConnectionState} onConnectionStateChange={setDnacConnectionState} onOpenSettings={() => { setSettingsInitialSection("dnac"); setSettingsOpen(true); }} />}
           {view === "toolbox" && <Toolbox hosts={deviceHosts} credentialProfiles={credentialProfiles} notify={notify} />}
           {view === "snippets" && <Snippets notify={notify} onRun={(snippet) => {
             if (!activeSession) { notify("Open a device session before running a snippet"); setView("workspace"); return; }
@@ -727,7 +750,10 @@ function App() {
         setDeviceHosts((current) => editingHost ? current.map((item) => item.id === host.id ? host : item) : [host, ...current]);
         setAddDeviceOpen(false); setEditingHost(null); setView("inventory");
       }} />}
-      {settingsOpen && <SettingsModal preferences={preferences} availableUpdate={availableUpdate} onUpdateFound={setAvailableUpdate} onClose={() => setSettingsOpen(false)} onSave={(next) => { setPreferences(next); setSettingsOpen(false); notify("Settings saved"); }} />}
+      {settingsOpen && <SettingsModal preferences={preferences} dnacSettings={dnacSettings} dnacConnectionState={dnacConnectionState} initialSection={settingsInitialSection} availableUpdate={availableUpdate} onUpdateFound={setAvailableUpdate} onClose={() => setSettingsOpen(false)} onSave={async (next, nextDnac, password, nextConnectionState) => {
+        await saveDnacConnection(nextDnac, password || undefined);
+        setPreferences(next); setDnacSettings(nextDnac); setDnacConnectionState(nextConnectionState); setSettingsOpen(false); notify("Settings saved");
+      }} />}
       {deviceDiscoveryOpen && <DeviceDiscoveryModal credentialProfiles={credentialProfiles} configuredSites={preferences.sites} existingHosts={deviceHosts} onClose={() => setDeviceDiscoveryOpen(false)} onImport={importDiscoveredHosts} />}
       {onboardingOpen && <WelcomeTour profile={userProfile} preferences={preferences} demoDevices={ciscoDemoHosts} onClose={() => setOnboardingOpen(false)} onComplete={completeWelcomeTour} />}
       {profileEditorOpen && <UserProfileModal profile={userProfile} onClose={() => setProfileEditorOpen(false)} onReset={() => { setUserProfile(defaultUserProfile); setProfileEditorOpen(false); setOnboardingOpen(true); }} onSave={(profile) => { setUserProfile(profile); setProfileEditorOpen(false); notify("Profile updated"); }} />}
@@ -763,7 +789,7 @@ function Sidebar({ view, setView, open, setOpen, onSearch, onOpenSettings, onEdi
 }
 
 function Topbar({ view, onSearch, notifications, notificationsOpen, onToggleNotifications, onClearNotifications, onOpenSettings }: { view: View; onSearch: () => void; notifications: AppNotification[]; notificationsOpen: boolean; onToggleNotifications: () => void; onClearNotifications: () => void; onOpenSettings: () => void }) {
-  const titles: Record<View, string> = { workspace: "Workspace", inventory: "Device inventory", topology: "Network topology", toolbox: "Network toolbox", snippets: "Command snippets", notes: "Engineer notes", assistant: "AI assistant", favorites: "Favourite devices", history: "Connection history", credentials: "Credential vault" };
+  const titles: Record<View, string> = { workspace: "Workspace", inventory: "Device inventory", topology: "Network topology", "client-search": "Client search", toolbox: "Network toolbox", snippets: "Command snippets", notes: "Engineer notes", assistant: "AI assistant", favorites: "Favourite devices", history: "Connection history", credentials: "Credential vault" };
   const unread = notifications.filter((item) => !item.read).length;
   return <header className="topbar"><div><h1>{titles[view]}</h1><span className="breadcrumb">NetSSH <ChevronRight size={12} /> {titles[view]}</span></div><div className="top-actions"><button className="mini-search" onClick={onSearch}><Search size={15} /> Quick search</button><div className="top-popover-wrap"><button className={`icon-button ${notificationsOpen ? "active" : ""}`} aria-label="Notifications" onClick={onToggleNotifications}><Bell size={18} />{unread > 0 && <em className="notification-count">{unread}</em>}</button>{notificationsOpen && <NotificationCenter notifications={notifications} onClear={onClearNotifications} />}</div><button className="icon-button" aria-label="Settings" onClick={onOpenSettings}><Settings size={18} /></button></div></header>;
 }
@@ -887,14 +913,20 @@ function AppUpdateSection({ initialUpdate = null, onUpdateFound }: { initialUpda
 }
 
 
-type SettingsSection = "updates" | "workspace" | "inventory" | "security";
+type SettingsSection = "updates" | "workspace" | "dnac" | "inventory" | "security";
 
-function SettingsModal({ preferences, availableUpdate, onUpdateFound, onClose, onSave }: { preferences: AppPreferences; availableUpdate: Update | null; onUpdateFound: (update: Update | null) => void; onClose: () => void; onSave: (preferences: AppPreferences) => void }) {
+function SettingsModal({ preferences, dnacSettings, dnacConnectionState, initialSection, availableUpdate, onUpdateFound, onClose, onSave }: { preferences: AppPreferences; dnacSettings: DnacSettings; dnacConnectionState: DnacConnectionState; initialSection: SettingsSection; availableUpdate: Update | null; onUpdateFound: (update: Update | null) => void; onClose: () => void; onSave: (preferences: AppPreferences, dnacSettings: DnacSettings, password: string, connectionState: DnacConnectionState) => Promise<void> }) {
   const [draft, setDraft] = useState(preferences);
-  const [section, setSection] = useState<SettingsSection>(availableUpdate ? "updates" : "workspace");
+  const [dnacDraft, setDnacDraft] = useState(dnacSettings);
+  const [dnacDraftConnectionState, setDnacDraftConnectionState] = useState(dnacConnectionState);
+  const [dnacPassword, setDnacPassword] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const [section, setSection] = useState<SettingsSection>(availableUpdate && initialSection === "workspace" ? "updates" : initialSection);
   const sections = [
     { id: "updates" as const, label: "Updates", description: "Version and releases", icon: RefreshCw },
     { id: "workspace" as const, label: "Workspace", description: "Appearance and behaviour", icon: Settings },
+    { id: "dnac" as const, label: "Cisco DNAC", description: "Client Search connection", icon: Network },
     { id: "inventory" as const, label: "Inventory", description: "Sites and platforms", icon: Server },
     { id: "security" as const, label: "Privacy & security", description: "Local storage and vault", icon: ShieldCheck },
   ];
@@ -916,6 +948,7 @@ function SettingsModal({ preferences, availableUpdate, onUpdateFound, onClose, o
           <div className="settings-section-heading"><span><SectionIcon size={18} /></span><div><h4>{selectedSection.label}</h4><p>{selectedSection.description}</p></div></div>
           <div className="settings-scroll">
             {section === "updates" && <AppUpdateSection initialUpdate={availableUpdate} onUpdateFound={onUpdateFound} />}
+            {section === "dnac" && <DnacSettingsPanel settings={dnacDraft} password={dnacPassword} connectionState={dnacDraftConnectionState} onChange={(next) => { setDnacDraft(next); setDnacDraftConnectionState("not-configured"); }} onPasswordChange={setDnacPassword} onConnectionStateChange={setDnacDraftConnectionState} />}
             {section === "workspace" && <><div className="settings-preference-grid">
               <label className="settings-select"><span><strong>Appearance</strong><small>Choose a light, dark, or operating-system theme</small></span><select value={draft.appearance} onChange={(event) => setDraft({ ...draft, appearance: event.target.value as Appearance })}><option value="dark">Dark</option><option value="light">Light</option><option value="system">Use system setting</option></select></label>
               <label className="settings-select"><span><strong>Default connection protocol</strong><small>Used when creating a new device profile</small></span><select value={draft.defaultProtocol} onChange={(event) => setDraft({ ...draft, defaultProtocol: event.target.value as ConnectionProtocol })}><option value="ssh">SSH</option><option value="telnet">Telnet</option><option value="serial">Serial</option></select></label>
@@ -928,7 +961,7 @@ function SettingsModal({ preferences, availableUpdate, onUpdateFound, onClose, o
           </div>
         </div>
       </div>
-      <div className="modal-actions settings-actions"><button className="secondary-button" onClick={onClose}>Cancel</button><button className="primary-button" onClick={() => onSave(draft)}>Save settings</button></div>
+      <div className="modal-actions settings-actions">{saveError && <span className="settings-save-error">{saveError}</span>}<button className="secondary-button" onClick={onClose} disabled={saving}>Cancel</button><button className="primary-button" disabled={saving} onClick={() => { setSaving(true); setSaveError(""); onSave(draft, dnacDraft, dnacPassword, dnacDraftConnectionState).catch((caught) => setSaveError(String(caught))).finally(() => setSaving(false)); }}>{saving ? "Saving…" : "Save settings"}</button></div>
     </section>
   </div>;
 }

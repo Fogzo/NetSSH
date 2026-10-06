@@ -14,6 +14,7 @@ import "./device-discovery.css";
 import "./inventory.css";
 import "./settings.css";
 import "./credentials.css";
+import "./dnac.css";
 import "@xterm/xterm/css/xterm.css";
 import { createId } from "./id";
 

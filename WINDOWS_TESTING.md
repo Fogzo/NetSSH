@@ -38,7 +38,9 @@ The two SHA-256 values must match before installation.
 3. Windows SmartScreen may show an unknown-publisher warning because this first tester package is unsigned.
 4. For Wi-Fi diagnostics on current Windows 11 releases, enable **Settings → Privacy & security → Location → Location services** and **Let desktop apps access your location**. NetSSH provides a direct settings button if Windows denies access.
 5. Test inventory persistence, credential-vault storage, SSH/Telnet reachability, diagnostics, multiple tabs, split panes, and AI provider configuration.
-6. Remove NetSSH through **Settings → Apps → Installed apps** when testing is complete.
+6. Under **Settings → Cisco DNAC**, test a Catalyst Center connection with certificate verification enabled. Confirm that **Remember connection** creates a NetSSH DNAC entry in Windows Credential Manager and that no password appears in the local preferences data.
+7. Search for a known wired-client MAC and confirm hostname, IP, health, site hierarchy, switch, and interface. Repeat with a known wireless client and confirm the access point and SSID fields when Catalyst Center provides them.
+8. Remove NetSSH through **Settings → Apps → Installed apps** when testing is complete.
 
 Only share unsigned packages with a small, trusted tester group through a private channel. Obtain a Windows code-signing certificate before wider or public distribution.
 

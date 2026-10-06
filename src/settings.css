@@ -392,6 +392,14 @@
   color: #687b86;
 }
 
+.settings-save-error {
+  max-width: 470px;
+  margin-right: auto;
+  color: #db8585;
+  font-size: 8px;
+  line-height: 1.4;
+}
+
 @media (max-width: 700px) {
   .settings-modal-redesigned {
     width: calc(100vw - 20px);

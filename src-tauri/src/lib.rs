@@ -8,6 +8,7 @@ use tauri::Manager;
 use tauri::{LogicalPosition, LogicalSize, WebviewBuilder, WebviewUrl};
 
 mod diagnostics;
+mod dnac;
 mod ssh;
 
 const KEYRING_SERVICE: &str = "app.netssh.client.ai";
@@ -564,6 +565,7 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build());
 
     builder
+        .manage(dnac::DnacState::default())
         .manage(ssh::TerminalManager::default())
         .setup(|app| {
             let handle = app.handle().clone();
@@ -601,6 +603,12 @@ pub fn run() {
             save_credential_enable_password,
             has_credential_enable_password,
             delete_credential_enable_password,
+            dnac::has_dnac_password,
+            dnac::save_dnac_password,
+            dnac::delete_dnac_password,
+            dnac::clear_dnac_connection,
+            dnac::test_dnac_connection,
+            dnac::search_dnac_client,
             fetch_security_advisories,
             ask_ai,
             diagnostics::run_ping,
